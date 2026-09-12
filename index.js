@@ -90,13 +90,29 @@ const commands = [
 		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
 	new SlashCommandBuilder()
 		.setName('sticky-set')
-		.setDescription('Pin a message to the bottom of this channel, or auto-post it into every new forum post')
+		.setDescription('Set a sticky message on any channel, or an auto-post for a forum')
 		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
-		.addStringOption((o) => o.setName('message').setDescription('The sticky message text').setRequired(true)),
+		.addChannelOption((o) =>
+			o
+				.setName('channel')
+				.setDescription('Which channel or forum')
+				.setRequired(true)
+				.addChannelTypes(ChannelType.GuildText, ChannelType.GuildForum)
+		)
+		.addStringOption((o) => o.setName('message').setDescription('Sticky text \u2014 for a normal text channel'))
+		.addStringOption((o) => o.setName('title').setDescription('Post title \u2014 for a forum'))
+		.addStringOption((o) => o.setName('description').setDescription('Post description \u2014 for a forum')),
 	new SlashCommandBuilder()
 		.setName('sticky-remove')
-		.setDescription('Remove the sticky message from this channel or forum')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+		.setDescription('Remove the sticky from any channel or forum')
+		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
+		.addChannelOption((o) =>
+			o
+				.setName('channel')
+				.setDescription('Which channel or forum')
+				.setRequired(true)
+				.addChannelTypes(ChannelType.GuildText, ChannelType.GuildForum)
+		),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -220,14 +236,26 @@ async function createTicketChannel(interaction, type, answers) {
 // --=-== | Sticky messages | ==-=--
 
 async function handleStickySet(interaction) {
+	const targetOption = interaction.options.getChannel('channel');
+	const channel = await interaction.guild.channels.fetch(targetOption.id);
 	const message = interaction.options.getString('message');
-	const channel = interaction.channel;
+	const title = interaction.options.getString('title');
+	const description = interaction.options.getString('description');
 	const sticky = loadJson(STICKY_FILE, {});
 
-	if (channel.parent && channel.parent.type === ChannelType.GuildForum) {
-		sticky[channel.parentId] = { type: 'forum', message };
+	if (channel.type === ChannelType.GuildForum) {
+		if (!title && !description) {
+			await interaction.reply({ content: 'A forum sticky needs at least a title or a description.', ephemeral: true });
+			return;
+		}
+		sticky[channel.id] = { type: 'forum', title: title || '', description: description || '' };
 		saveJson(STICKY_FILE, sticky);
-		await interaction.reply({ content: 'Every new post in this forum will get this message automatically.', ephemeral: true });
+		await interaction.reply({ content: `Every new post in ${channel} will get this automatically.`, ephemeral: true });
+		return;
+	}
+
+	if (!message) {
+		await interaction.reply({ content: 'A channel sticky needs a message.', ephemeral: true });
 		return;
 	}
 
@@ -238,20 +266,20 @@ async function handleStickySet(interaction) {
 	const sent = await channel.send(message);
 	sticky[channel.id] = { type: 'text', message, lastMessageId: sent.id };
 	saveJson(STICKY_FILE, sticky);
-	await interaction.reply({ content: 'Sticky message set for this channel.', ephemeral: true });
+	await interaction.reply({ content: `Sticky message set for ${channel}.`, ephemeral: true });
 }
 
 async function handleStickyRemove(interaction) {
-	const channel = interaction.channel;
+	const targetOption = interaction.options.getChannel('channel');
+	const channel = await interaction.guild.channels.fetch(targetOption.id);
 	const sticky = loadJson(STICKY_FILE, {});
-	const targetId = channel.parent && channel.parent.type === ChannelType.GuildForum ? channel.parentId : channel.id;
-	const entry = sticky[targetId];
-	if (entry?.lastMessageId) {
+	const entry = sticky[channel.id];
+	if (entry?.type === 'text' && entry.lastMessageId) {
 		await channel.messages.delete(entry.lastMessageId).catch(() => {});
 	}
-	delete sticky[targetId];
+	delete sticky[channel.id];
 	saveJson(STICKY_FILE, sticky);
-	await interaction.reply({ content: 'Sticky removed.', ephemeral: true });
+	await interaction.reply({ content: `Sticky removed from ${channel}.`, ephemeral: true });
 }
 
 // --=-== | Events | ==-=--
@@ -279,8 +307,11 @@ client.on(Events.ThreadCreate, async (thread) => {
 	const sticky = loadJson(STICKY_FILE, {});
 	const entry = sticky[thread.parentId];
 	if (!entry || entry.type !== 'forum') return;
+	const embed = new EmbedBuilder().setColor(BRAND_COLOR);
+	if (entry.title) embed.setTitle(entry.title);
+	if (entry.description) embed.setDescription(entry.description);
 	setTimeout(() => {
-		thread.send(entry.message).catch(() => {});
+		thread.send({ embeds: [embed] }).catch(() => {});
 	}, 1500);
 });
 
