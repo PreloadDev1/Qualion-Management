@@ -1,0 +1,37 @@
+{
+	"ticket": {
+		"id": "ticket",
+		"label": "General ticket",
+		"prefix": "ticket",
+		"roleId": null,
+		"fields": ["What do you need help with?"]
+	},
+	"ui": {
+		"id": "ui",
+		"label": "UI Designer",
+		"prefix": "application",
+		"roleId": "1548463954169438320",
+		"fields": ["Portfolio", "Pricing", "Availability"]
+	},
+	"scripting": {
+		"id": "scripting",
+		"label": "Scripter",
+		"prefix": "application",
+		"roleId": "1548464720648994836",
+		"fields": ["Portfolio", "Pricing", "Availability"]
+	},
+	"vfx": {
+		"id": "vfx",
+		"label": "VFX Artist",
+		"prefix": "application",
+		"roleId": "1548464781151969280",
+		"fields": ["Portfolio", "Pricing", "Availability"]
+	},
+	"building": {
+		"id": "building",
+		"label": "Builder",
+		"prefix": "application",
+		"roleId": "1548464911368069220",
+		"fields": ["Portfolio", "Pricing", "Availability"]
+	}
+}
