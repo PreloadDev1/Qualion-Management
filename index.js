@@ -1,6 +1,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const {
 	Client,
 	GatewayIntentBits,
@@ -42,7 +43,7 @@ const DISCIPLINES = {
 
 // --=-== | Ticket counter | ==-=--
 
-const COUNTER_FILE = path.join(__dirname, 'counter.json');
+const COUNTER_FILE = process.env.COUNTER_PATH || path.join(__dirname, 'counter.json');
 
 function nextTicketNumber() {
 	let count = 0;
@@ -228,5 +229,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 		}
 	}
 });
+
+// --=-== | Keep-alive server (Render) | ==-=--
+
+http
+	.createServer((req, res) => {
+		res.writeHead(200, { 'Content-Type': 'text/plain' });
+		res.end('OK');
+	})
+	.listen(process.env.PORT || 3000);
 
 client.login(DISCORD_TOKEN);
