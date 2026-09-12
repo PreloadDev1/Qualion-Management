@@ -33,11 +33,11 @@ Each open ticket gets a Close button, and an Approve button too if the type has 
 Channels are named `┃<prefix>-001` and so on, numbered per prefix rather than per type — every `application` ticket shares one counter regardless of discipline. Drop the `┃` from `createTicketChannel` in the code if it doesn't render the way you want.
 
 ## Sticky messages
-`/sticky-set channel:<pick any channel> message:<text>` keeps that message pinned to the bottom of the picked channel — any new message there makes the bot delete its old sticky and repost it underneath. Runs from anywhere, including an admin-only channel like #commands, since the target is a picker option rather than "wherever this command is typed."
+`/sticky-set channel:<pick any text channel> message:<text>` keeps that message pinned to the bottom of the picked channel — any new message posted there makes the bot delete its old sticky and repost it underneath, so it's always the first thing anyone sees. Runs from anywhere, including an admin-only channel like #commands, since the target is a picker option. `/sticky-remove channel:<pick>` clears it.
 
-Point it at a forum instead and the fields that matter change: use `title` and/or `description` rather than `message` — that becomes an embed posted automatically into every new post created in that forum from then on, rather than following a single message stream. `/sticky-remove channel:<pick>` clears whichever kind is set on the picked target.
+Forums aren't supported here on purpose — they already have their own pinned-posts feature built into Discord, so a bot-managed sticky would just duplicate that.
 
-The bot needs to actually have access to whatever channel or forum gets picked — if it can't view or send in that channel, the command will fail even though the target exists.
+The bot needs to actually have access to whatever channel gets picked — if it can't view or send there, the command fails even though picking it from the dropdown works fine.
 
 ## Numbering and config persistence
 `counter.json`, `config.json`, and `sticky.json` all live next to the script. On a host with no persistent disk (Render's free tier, for one), all three reset to what's shipped in the repo on every redeploy — live changes made through commands don't survive a redeploy unless the host has a volume, or the change also gets committed.
