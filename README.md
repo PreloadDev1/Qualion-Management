@@ -1,39 +1,42 @@
 # Setup
 
 ## Application
-Go to the Discord Developer Portal, create a new application, add a bot to it, copy the bot token. Copy the application's Client ID from the General Information page too.
+Discord Developer Portal → new application → add a bot → copy the bot token. Copy the Client ID from General Information too.
 
 ## Invite
-Under OAuth2 → URL Generator, check `bot` and `applications.commands`. For bot permissions, either check Administrator or pick View Channels, Manage Channels, Send Messages, Embed Links individually.
+OAuth2 → URL Generator → check `bot` and `applications.commands`. Bot permissions: either Administrator, or View Channels, Manage Channels, Send Messages, Embed Links individually.
 
 ## IDs
-Turn on Developer Mode in Discord (User Settings → Advanced). Right-click the server to copy `GUILD_ID`, right-click the Tickets category for `TICKETS_CATEGORY_ID`, right-click the Leads role for `LEADS_ROLE_ID`.
+Developer Mode on (User Settings → Advanced). Right-click the server for `GUILD_ID`, the Tickets category for `TICKETS_CATEGORY_ID`, the Leads role for `LEADS_ROLE_ID`.
 
 ## Environment
-Five values now: `DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, `TICKETS_CATEGORY_ID`, `LEADS_ROLE_ID`. Copy `.env.example` to `.env` and fill them in, or paste them into your host's environment variables panel.
+`DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, `TICKETS_CATEGORY_ID`, `LEADS_ROLE_ID` — five values, same as `.env.example`.
 
 ## Run
 ```
 npm install
 npm start
 ```
-Then type `/post-panel` in whichever channel should hold the panel.
+Then `/post-panel` in whichever channel should hold it.
 
 ## Ticket types
-Buttons and their fields are no longer hardcoded — they live in `config.json`, pre-filled with a general ticket and the four discipline applications (UI, Scripting, VFX, Building), each asking Portfolio, Pricing, and Availability.
+Buttons and fields live in `config.json`, not code. Pre-filled with a general ticket and four disciplines (UI, Scripting, VFX, Building), each asking Portfolio, Pricing, Availability.
 
-Add or change one without touching code:
 ```
 /add-ticket-type id:<short-id> label:<button text> prefix:<channel-prefix> field1:<question> role:<optional role> field2:<optional> field3:<optional> field4:<optional> field5:<optional>
 ```
-Up to 5 fields per type (Discord's modal limit). `role` is optional — leave it off for a type that should only ping Leads, like the general ticket.
+Up to 5 fields (Discord's modal limit). Leave `role` off for a type that should only reach Leads. `/remove-ticket-type id:<short-id>` deletes one. `/list-ticket-types` shows everything currently configured, as an embed. Re-run `/post-panel` after adding or removing a type — an existing posted panel doesn't update itself.
 
-`/remove-ticket-type id:<short-id>` deletes one. `/list-ticket-types` shows everything currently configured. Re-run `/post-panel` after changing types so the buttons on the message match.
+## Ticket channels
+Each open ticket gets a Close button, and an Approve button too if the type has a role attached. Approve grants that role to whoever opened the ticket and posts a confirmation — it doesn't close the channel, that's still a separate step. Close is Leads-only and deletes the channel after five seconds.
 
-Channels come out named `┃<prefix>-001`, `┃<prefix>-002`, and so on — numbering is per prefix, so `ticket` and `application` count separately. Drop the `┃` from the code in `createTicketChannel` if it doesn't render the way you want on your client.
+Channels are named `┃<prefix>-001` and so on, numbered per prefix rather than per type — every `application` ticket shares one counter regardless of discipline. Drop the `┃` from `createTicketChannel` in the code if it doesn't render the way you want.
+
+## Sticky messages
+`/sticky-set message:<text>` in a normal text channel keeps that message pinned to the bottom — any new message in the channel makes the bot delete its old sticky and repost it underneath. Run the same command from inside any post in a forum channel instead, and it switches modes: the message gets posted automatically into every new post created in that forum from then on, rather than following a single message stream. `/sticky-remove` clears whichever kind is set on the current channel or forum.
 
 ## Numbering and config persistence
-`counter.json` and `config.json` both live next to the script. On a host with no persistent disk (Render's free tier, for one), both reset to what's shipped in the repo on every redeploy — a `/add-ticket-type` change or the running ticket count won't survive a redeploy unless the host has a volume, or the change is also committed to the repo.
+`counter.json`, `config.json`, and `sticky.json` all live next to the script. On a host with no persistent disk (Render's free tier, for one), all three reset to what's shipped in the repo on every redeploy — live changes made through commands don't survive a redeploy unless the host has a volume, or the change also gets committed.
 
 ## Hosting
-Running this from a laptop means tickets stop working the moment it closes. A small always-on host keeps it running — Render's free tier works with a keep-alive ping (see the HTTP server at the bottom of `index.js`, paired with an external uptime monitor).
+A host needs to stay running for this to work continuously. Render's free tier works with a keep-alive ping — see the HTTP server at the bottom of `index.js`, paired with an external uptime monitor hitting it every few minutes.

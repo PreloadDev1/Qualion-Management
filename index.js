@@ -28,36 +28,36 @@ const {
 	LEADS_ROLE_ID,
 } = process.env;
 
-// --=-== | Config storage (ticket types) | ==-=--
+const BRAND_COLOR = 0x5865f2;
+
+// --=-== | Storage (tickets, tickets counter, sticky messages) | ==-=--
 
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 const COUNTER_FILE = process.env.COUNTER_PATH || path.join(__dirname, 'counter.json');
+const STICKY_FILE = path.join(__dirname, 'sticky.json');
 
-function loadConfig() {
-	if (!fs.existsSync(CONFIG_FILE)) return {};
-	return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+function loadJson(file, fallback) {
+	if (!fs.existsSync(file)) return fallback;
+	return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-function saveConfig(config) {
-	fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-}
-
-function loadCounters() {
-	if (!fs.existsSync(COUNTER_FILE)) return {};
-	return JSON.parse(fs.readFileSync(COUNTER_FILE, 'utf8'));
+function saveJson(file, data) {
+	fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
 function nextNumber(prefix) {
-	const counters = loadCounters();
+	const counters = loadJson(COUNTER_FILE, {});
 	const next = (counters[prefix] || 0) + 1;
 	counters[prefix] = next;
-	fs.writeFileSync(COUNTER_FILE, JSON.stringify(counters));
+	saveJson(COUNTER_FILE, counters);
 	return String(next).padStart(3, '0');
 }
 
 // --=-== | Client | ==-=--
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+	intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+});
 
 // --=-== | Slash commands | ==-=--
 
@@ -70,7 +70,7 @@ const commands = [
 		.addStringOption((o) => o.setName('label').setDescription('Button label').setRequired(true))
 		.addStringOption((o) => o.setName('prefix').setDescription('Channel prefix, e.g. application or ticket').setRequired(true))
 		.addStringOption((o) => o.setName('field1').setDescription('First field label').setRequired(true))
-		.addRoleOption((o) => o.setName('role').setDescription('Role to ping and grant access, optional'))
+		.addRoleOption((o) => o.setName('role').setDescription('Role to ping, grant access, and approve into'))
 		.addStringOption((o) => o.setName('field2').setDescription('Second field label'))
 		.addStringOption((o) => o.setName('field3').setDescription('Third field label'))
 		.addStringOption((o) => o.setName('field4').setDescription('Fourth field label'))
@@ -87,6 +87,15 @@ const commands = [
 	new SlashCommandBuilder()
 		.setName('post-panel')
 		.setDescription('Post the ticket panel in this channel')
+		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+	new SlashCommandBuilder()
+		.setName('sticky-set')
+		.setDescription('Pin a message to the bottom of this channel, or auto-post it into every new forum post')
+		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
+		.addStringOption((o) => o.setName('message').setDescription('The sticky message text').setRequired(true)),
+	new SlashCommandBuilder()
+		.setName('sticky-remove')
+		.setDescription('Remove the sticky message from this channel or forum')
 		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
 ].map((c) => c.toJSON());
 
@@ -114,8 +123,10 @@ function buildPanel(config) {
 	}
 
 	const embed = new EmbedBuilder()
+		.setColor(BRAND_COLOR)
 		.setTitle('Open a ticket')
-		.setDescription("Pick the button that matches what you need. A private channel opens with a short form.");
+		.setDescription('Pick the button that matches what you need. A private channel opens with a short form.')
+		.setFooter({ text: 'Qualion Management' });
 
 	return { embeds: [embed], components: rows };
 }
@@ -174,21 +185,73 @@ async function createTicketChannel(interaction, type, answers) {
 	});
 
 	const embed = new EmbedBuilder()
-		.setTitle(`${type.label} — ${number}`)
+		.setColor(BRAND_COLOR)
+		.setTitle(`${type.label}  —  ${number}`)
+		.setThumbnail(interaction.user.displayAvatarURL())
 		.addFields(
 			{ name: 'Opened by', value: `<@${interaction.user.id}>` },
-			...type.fields.map((field, i) => ({ name: field, value: answers[i] || '—' }))
-		);
+			...type.fields.map((field, i) => ({ name: field, value: answers[i] || '—', inline: true }))
+		)
+		.setFooter({ text: 'Qualion Management' })
+		.setTimestamp();
 
-	const closeRow = new ActionRowBuilder().addComponents(
-		new ButtonBuilder().setCustomId('close_ticket').setLabel('Close ticket').setStyle(ButtonStyle.Danger)
-	);
+	const buttons = [];
+	if (type.roleId) {
+		buttons.push(
+			new ButtonBuilder()
+				.setCustomId(`approve:${interaction.user.id}:${type.roleId}`)
+				.setLabel('Approve')
+				.setStyle(ButtonStyle.Success)
+		);
+	}
+	buttons.push(new ButtonBuilder().setCustomId('close_ticket').setLabel('Close ticket').setStyle(ButtonStyle.Danger));
 
 	const pingParts = [`<@&${LEADS_ROLE_ID}>`];
 	if (type.roleId) pingParts.push(`<@&${type.roleId}>`);
 
-	await channel.send({ content: pingParts.join(' '), embeds: [embed], components: [closeRow] });
+	await channel.send({
+		content: pingParts.join(' '),
+		embeds: [embed],
+		components: [new ActionRowBuilder().addComponents(buttons)],
+	});
 	return channel;
+}
+
+// --=-== | Sticky messages | ==-=--
+
+async function handleStickySet(interaction) {
+	const message = interaction.options.getString('message');
+	const channel = interaction.channel;
+	const sticky = loadJson(STICKY_FILE, {});
+
+	if (channel.parent && channel.parent.type === ChannelType.GuildForum) {
+		sticky[channel.parentId] = { type: 'forum', message };
+		saveJson(STICKY_FILE, sticky);
+		await interaction.reply({ content: 'Every new post in this forum will get this message automatically.', ephemeral: true });
+		return;
+	}
+
+	const existing = sticky[channel.id];
+	if (existing?.lastMessageId) {
+		await channel.messages.delete(existing.lastMessageId).catch(() => {});
+	}
+	const sent = await channel.send(message);
+	sticky[channel.id] = { type: 'text', message, lastMessageId: sent.id };
+	saveJson(STICKY_FILE, sticky);
+	await interaction.reply({ content: 'Sticky message set for this channel.', ephemeral: true });
+}
+
+async function handleStickyRemove(interaction) {
+	const channel = interaction.channel;
+	const sticky = loadJson(STICKY_FILE, {});
+	const targetId = channel.parent && channel.parent.type === ChannelType.GuildForum ? channel.parentId : channel.id;
+	const entry = sticky[targetId];
+	if (entry?.lastMessageId) {
+		await channel.messages.delete(entry.lastMessageId).catch(() => {});
+	}
+	delete sticky[targetId];
+	saveJson(STICKY_FILE, sticky);
+	await interaction.reply({ content: 'Sticky removed.', ephemeral: true });
 }
 
 // --=-== | Events | ==-=--
@@ -198,10 +261,33 @@ client.once(Events.ClientReady, async () => {
 	console.log(`Logged in as ${client.user.tag}`);
 });
 
+client.on(Events.MessageCreate, async (message) => {
+	if (message.author.id === client.user.id) return;
+	const sticky = loadJson(STICKY_FILE, {});
+	const entry = sticky[message.channel.id];
+	if (!entry || entry.type !== 'text') return;
+	if (entry.lastMessageId) {
+		await message.channel.messages.delete(entry.lastMessageId).catch(() => {});
+	}
+	const sent = await message.channel.send(entry.message);
+	entry.lastMessageId = sent.id;
+	saveJson(STICKY_FILE, sticky);
+});
+
+client.on(Events.ThreadCreate, async (thread) => {
+	if (!thread.parentId) return;
+	const sticky = loadJson(STICKY_FILE, {});
+	const entry = sticky[thread.parentId];
+	if (!entry || entry.type !== 'forum') return;
+	setTimeout(() => {
+		thread.send(entry.message).catch(() => {});
+	}, 1500);
+});
+
 client.on(Events.InteractionCreate, async (interaction) => {
 	try {
 		if (interaction.isChatInputCommand() && interaction.commandName === 'add-ticket-type') {
-			const config = loadConfig();
+			const config = loadJson(CONFIG_FILE, {});
 			const id = interaction.options.getString('id');
 			const fields = [1, 2, 3, 4, 5]
 				.map((n) => interaction.options.getString(`field${n}`))
@@ -213,37 +299,43 @@ client.on(Events.InteractionCreate, async (interaction) => {
 				roleId: interaction.options.getRole('role')?.id || null,
 				fields,
 			};
-			saveConfig(config);
+			saveJson(CONFIG_FILE, config);
 			await interaction.reply({
-				content: `Ticket type "${id}" saved with ${fields.length} field(s). Note: on a free host with no persistent disk, this resets to whatever's in config.json on the next redeploy.`,
+				content: `Ticket type "${id}" saved with ${fields.length} field(s). Resets to config.json on the next redeploy on hosts with no persistent disk.`,
 				ephemeral: true,
 			});
 			return;
 		}
 
 		if (interaction.isChatInputCommand() && interaction.commandName === 'remove-ticket-type') {
-			const config = loadConfig();
+			const config = loadJson(CONFIG_FILE, {});
 			const id = interaction.options.getString('id');
 			delete config[id];
-			saveConfig(config);
+			saveJson(CONFIG_FILE, config);
 			await interaction.reply({ content: `Ticket type "${id}" removed.`, ephemeral: true });
 			return;
 		}
 
 		if (interaction.isChatInputCommand() && interaction.commandName === 'list-ticket-types') {
-			const config = loadConfig();
-			const lines = Object.values(config).map(
-				(t) => `${t.id} — ${t.label} (${t.prefix}-XXX, fields: ${t.fields.join(', ')})`
-			);
-			await interaction.reply({
-				content: lines.length ? lines.join('\n') : 'No ticket types configured yet.',
-				ephemeral: true,
-			});
+			const config = loadJson(CONFIG_FILE, {});
+			const types = Object.values(config);
+			const embed = new EmbedBuilder().setColor(BRAND_COLOR).setTitle('Ticket types');
+			if (types.length === 0) {
+				embed.setDescription('None configured yet.');
+			} else {
+				for (const t of types) {
+					embed.addFields({
+						name: `${t.label}  •  ${t.id}`,
+						value: `Prefix: \`${t.prefix}\`\nRole: ${t.roleId ? `<@&${t.roleId}>` : 'None'}\nFields: ${t.fields.join(', ')}`,
+					});
+				}
+			}
+			await interaction.reply({ embeds: [embed], ephemeral: true });
 			return;
 		}
 
 		if (interaction.isChatInputCommand() && interaction.commandName === 'post-panel') {
-			const config = loadConfig();
+			const config = loadJson(CONFIG_FILE, {});
 			const panel = buildPanel(config);
 			if (!panel) {
 				await interaction.reply({
@@ -257,9 +349,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
 			return;
 		}
 
+		if (interaction.isChatInputCommand() && interaction.commandName === 'sticky-set') {
+			await handleStickySet(interaction);
+			return;
+		}
+
+		if (interaction.isChatInputCommand() && interaction.commandName === 'sticky-remove') {
+			await handleStickyRemove(interaction);
+			return;
+		}
+
 		if (interaction.isButton() && interaction.customId.startsWith('open:')) {
 			const id = interaction.customId.split(':')[1];
-			const config = loadConfig();
+			const config = loadJson(CONFIG_FILE, {});
 			const type = config[id];
 			if (!type) {
 				await interaction.reply({ content: 'That ticket type no longer exists.', ephemeral: true });
@@ -271,11 +373,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 		if (interaction.isModalSubmit() && interaction.customId.startsWith('submit:')) {
 			const id = interaction.customId.split(':')[1];
-			const config = loadConfig();
+			const config = loadJson(CONFIG_FILE, {});
 			const type = config[id];
 			const answers = type.fields.map((_, i) => interaction.fields.getTextInputValue(`field${i}`));
 			await interaction.reply({ content: 'Ticket created, check the new channel.', ephemeral: true });
 			await createTicketChannel(interaction, type, answers);
+			return;
+		}
+
+		if (interaction.isButton() && interaction.customId.startsWith('approve:')) {
+			const isLead = interaction.member.roles.cache.has(LEADS_ROLE_ID);
+			if (!isLead) {
+				await interaction.reply({ content: 'Only Leads can approve this.', ephemeral: true });
+				return;
+			}
+			const [, applicantId, roleId] = interaction.customId.split(':');
+			const member = await interaction.guild.members.fetch(applicantId).catch(() => null);
+			if (!member) {
+				await interaction.reply({ content: "Couldn't find that member anymore.", ephemeral: true });
+				return;
+			}
+			await member.roles.add(roleId).catch(() => {});
+			await interaction.reply(`<@${applicantId}> approved — <@&${roleId}> role added.`);
 			return;
 		}
 
