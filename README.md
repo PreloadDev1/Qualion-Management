@@ -10,14 +10,17 @@ OAuth2 → URL Generator → check `bot` and `applications.commands`. Bot permis
 Developer Mode on (User Settings → Advanced). Right-click the server for `GUILD_ID`, the Tickets category for `TICKETS_CATEGORY_ID`, the Leads role for `LEADS_ROLE_ID`.
 
 ## Environment
-`DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, `TICKETS_CATEGORY_ID`, `LEADS_ROLE_ID` — five values, same as `.env.example`.
+`DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, `TICKETS_CATEGORY_ID`, `LEADS_ROLE_ID`, `MEMBER_ROLE_ID`, `RULES_CHANNEL_ID` — seven values, same as `.env.example`.
 
 ## Run
 ```
 npm install
 npm start
 ```
-Then `/post-panel` in whichever channel should hold it.
+Then `/post-panel` in whichever channel should hold the ticket panel, and `/post-verify` in whichever channel should hold verification.
+
+## Verification
+`/post-verify` posts a green-accented embed pointing at `RULES_CHANNEL_ID`, with a **Verify** button. Clicking it grants `MEMBER_ROLE_ID` — clicking again once already verified just replies saying so, no duplicate role add. Post it once in whatever the entry channel is; it works from that single message from then on, nothing to re-run unless the message gets deleted.
 
 ## Ticket types
 Buttons and fields live in `config.json`, not code. Pre-filled with a general ticket and four disciplines (UI, Scripting, VFX, Building), each asking Portfolio, Pricing, Availability.

@@ -26,9 +26,12 @@ const {
 	GUILD_ID,
 	TICKETS_CATEGORY_ID,
 	LEADS_ROLE_ID,
+	MEMBER_ROLE_ID,
+	RULES_CHANNEL_ID,
 } = process.env;
 
 const BRAND_COLOR = 0x5865f2;
+const VERIFY_COLOR = 0x57f287;
 
 // --=-== | Storage (tickets, tickets counter, sticky messages) | ==-=--
 
@@ -103,6 +106,10 @@ const commands = [
 		.addChannelOption((o) =>
 			o.setName('channel').setDescription('Which channel').setRequired(true).addChannelTypes(ChannelType.GuildText)
 		),
+	new SlashCommandBuilder()
+		.setName('post-verify')
+		.setDescription('Post the verification embed in this channel')
+		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -137,7 +144,23 @@ function buildPanel(config) {
 	return { embeds: [embed], components: rows };
 }
 
-// --=-== | Modal | ==-=--
+// --=-== | Verification | ==-=--
+
+function buildVerifyPanel() {
+	const embed = new EmbedBuilder()
+		.setColor(VERIFY_COLOR)
+		.setTitle('Verify to enter')
+		.setDescription(
+			`Read <#${RULES_CHANNEL_ID}> first.\n\nOnce you're good with it, click **Verify** below to unlock the rest of the server.`
+		)
+		.setFooter({ text: 'Qualion Management' });
+
+	const row = new ActionRowBuilder().addComponents(
+		new ButtonBuilder().setCustomId('verify_member').setLabel('VERIFY').setStyle(ButtonStyle.Success)
+	);
+
+	return { embeds: [embed], components: [row] };
+}
 
 function buildModal(type) {
 	const modal = new ModalBuilder().setCustomId(`submit:${type.id}`).setTitle(type.label.slice(0, 45));
@@ -339,6 +362,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 			return;
 		}
 
+		if (interaction.isChatInputCommand() && interaction.commandName === 'post-verify') {
+			await interaction.channel.send(buildVerifyPanel());
+			await interaction.reply({ content: 'Verification panel posted.', ephemeral: true });
+			return;
+		}
+
 		if (interaction.isChatInputCommand() && interaction.commandName === 'sticky-set') {
 			await handleStickySet(interaction);
 			return;
@@ -346,6 +375,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 		if (interaction.isChatInputCommand() && interaction.commandName === 'sticky-remove') {
 			await handleStickyRemove(interaction);
+			return;
+		}
+
+		if (interaction.isButton() && interaction.customId === 'verify_member') {
+			if (interaction.member.roles.cache.has(MEMBER_ROLE_ID)) {
+				await interaction.reply({ content: "You're already verified.", ephemeral: true });
+				return;
+			}
+			await interaction.member.roles.add(MEMBER_ROLE_ID).catch(() => {});
+			await interaction.reply({ content: "You're verified — welcome in.", ephemeral: true });
 			return;
 		}
 
