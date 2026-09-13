@@ -23,28 +23,19 @@ Then `/post-panel` in whichever channel should hold the ticket panel, and `/post
 `/post-verify` posts a green-accented embed pointing at `RULES_CHANNEL_ID`, with a **Verify** button. Clicking it grants `MEMBER_ROLE_ID` — clicking again once already verified just replies saying so, no duplicate role add. Post it once in whatever the entry channel is; it works from that single message from then on, nothing to re-run unless the message gets deleted.
 
 ## Ticket types
-Buttons and fields live in `config.json`, not code. Pre-filled with four disciplines (UI, Scripting, VFX, Building), each asking Portfolio, Pricing, Availability.
+Buttons live in `config.json`, not code. Pre-filled with four disciplines (UI, Scripting, VFX, Building) — clicking a button now creates the ticket channel immediately, no form first.
 
-`/add-ticket-type` takes no options — it starts a short back-and-forth right in the channel instead. It asks for the id, the button label, the channel prefix, a role to mention (or `skip`), then fields one at a time until `done` is typed (up to 5, Discord's modal limit). Type `cancel` at any point to stop, or just stop answering — it gives up after two minutes of silence. `/remove-ticket-type id:<short-id>` deletes one, still a plain command since there's nothing to walk through. `/list-ticket-types` shows everything currently configured, as an embed. Re-run `/post-panel` after adding or removing a type — an existing posted panel doesn't update itself.
+`/add-ticket-type` takes no options — it asks three short questions in the channel instead: the id, the button label, the channel prefix, then a role to mention (or `skip`). Type `cancel` at any point to stop, or just stop answering — it gives up after two minutes of silence. `/remove-ticket-type id:<short-id>` deletes one. `/list-ticket-types` shows everything currently configured, as an embed. Re-run `/post-panel` after adding or removing a type — an existing posted panel doesn't update itself.
 
-**This needs one thing turned on that wasn't needed before:** Developer Portal → your app → Bot → Privileged Gateway Intents → turn on **Message Content Intent**. Without it, the bot receives an empty string for every answer typed during setup, and the wizard breaks silently rather than with an obvious error. Fine to enable at this server's size — that toggle only requires Discord's review process once a bot is in 100+ servers, and this one isn't.
+This still needs Message Content Intent turned on in the Developer Portal (Bot → Privileged Gateway Intents) for the setup wizard to read your answers — same requirement as before, not something new from this change.
 
 ## Ticket channels
 Each open ticket gets a Close button, and an Approve button too if the type has a role attached. Approve grants that role to whoever opened the ticket and posts a confirmation — it doesn't close the channel, that's still a separate step. Close is Leads-only and deletes the channel after five seconds.
 
 Channels are named `┃<prefix>-001` and so on, numbered per prefix rather than per type — every `application` ticket shares one counter regardless of discipline. Drop the `┃` from `createTicketChannel` in the code if it doesn't render the way you want.
 
-## Sticky messages
-`/sticky-set channel:<pick any text channel> message:<text>` keeps that message pinned to the bottom of the picked channel. On any new message there, the bot sends the sticky again immediately, then cleans up the old copy right after — no gap where nothing's showing. `/sticky-remove channel:<pick>` clears it.
-
-Sticky data now survives restarts and redeploys, not just this session. Set `STORAGE_CHANNEL_ID` to a private channel the bot can see (create one, keep it hidden from everyone else, doesn't need to be visible to Leads either) and every sticky change gets written there too, as a pinned message the bot reads back on startup. Without `STORAGE_CHANNEL_ID` set, sticky still works, it just goes back to resetting on every redeploy like `config.json` and `counter.json` still do — this same trick could cover those two as well if that becomes worth fixing later, just not done yet since it wasn't what was asked.
-
-Forums aren't supported here on purpose — they already have their own pinned-posts feature built into Discord, so a bot-managed sticky would just duplicate that.
-
-The bot needs to actually have access to whatever channel gets picked, and to the storage channel — if it can't view or send there, the relevant command fails even though picking it from the dropdown works fine.
-
 ## Numbering and config persistence
-`counter.json`, `config.json`, and `sticky.json` all live next to the script. On a host with no persistent disk (Render's free tier, for one), all three reset to what's shipped in the repo on every redeploy — live changes made through commands don't survive a redeploy unless the host has a volume, or the change also gets committed.
+`counter.json` and `config.json` both live next to the script. On a host with no persistent disk (Render's free tier, for one), both reset to what's shipped in the repo on every redeploy — live changes made through commands don't survive a redeploy unless the host has a volume, or the change also gets committed.
 
 ## Clear channel
 `/clear-channel channel:<pick> confirm:CONFIRM` deletes every message in the picked channel. The `confirm` field has to be exactly `CONFIRM`, capitals included — anything else, including leaving it blank, just explains what the command does without touching anything. There's no undo once it runs.

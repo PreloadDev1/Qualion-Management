@@ -10,9 +10,6 @@ const {
 	ActionRowBuilder,
 	ButtonBuilder,
 	ButtonStyle,
-	ModalBuilder,
-	TextInputBuilder,
-	TextInputStyle,
 	ChannelType,
 	PermissionsBitField,
 	EmbedBuilder,
@@ -29,17 +26,15 @@ const {
 	LEADS_ROLE_ID,
 	MEMBER_ROLE_ID,
 	RULES_CHANNEL_ID,
-	STORAGE_CHANNEL_ID,
 } = process.env;
 
 const BRAND_COLOR = 0x5865f2;
 const VERIFY_COLOR = 0x57f287;
 
-// --=-== | Storage (tickets, tickets counter, sticky messages) | ==-=--
+// --=-== | Storage (ticket types, ticket counter) | ==-=--
 
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 const COUNTER_FILE = process.env.COUNTER_PATH || path.join(__dirname, 'counter.json');
-const STICKY_FILE = path.join(__dirname, 'sticky.json');
 
 function loadJson(file, fallback) {
 	if (!fs.existsSync(file)) return fallback;
@@ -48,48 +43,6 @@ function loadJson(file, fallback) {
 
 function saveJson(file, data) {
 	fs.writeFileSync(file, JSON.stringify(data, null, 2));
-}
-
-// --=-== | Sticky persistence via Discord (survives disk resets) | ==-=--
-
-let stickyStoreMessageId = null;
-
-async function loadStickyFromDiscord() {
-	if (!STORAGE_CHANNEL_ID) return;
-	try {
-		const channel = await client.channels.fetch(STORAGE_CHANNEL_ID);
-		const pins = await channel.messages.fetchPinned();
-		const stored = pins.find((m) => m.author.id === client.user.id);
-		if (stored) {
-			stickyStoreMessageId = stored.id;
-			const raw = stored.content.replace(/^```json\n|\n```$/g, '');
-			saveJson(STICKY_FILE, JSON.parse(raw));
-			console.log('Sticky data restored from storage channel.');
-		}
-	} catch (err) {
-		console.log(`Sticky restore failed: ${err.message}`);
-	}
-}
-
-async function persistSticky(sticky) {
-	saveJson(STICKY_FILE, sticky);
-	if (!STORAGE_CHANNEL_ID) return;
-	try {
-		const channel = await client.channels.fetch(STORAGE_CHANNEL_ID);
-		const content = '```json\n' + JSON.stringify(sticky) + '\n```';
-		if (stickyStoreMessageId) {
-			const msg = await channel.messages.fetch(stickyStoreMessageId).catch(() => null);
-			if (msg) {
-				await msg.edit(content);
-				return;
-			}
-		}
-		const sent = await channel.send(content);
-		await sent.pin().catch(() => {});
-		stickyStoreMessageId = sent.id;
-	} catch (err) {
-		console.log(`Sticky persist failed: ${err.message}`);
-	}
 }
 
 function nextNumber(prefix) {
@@ -126,21 +79,6 @@ const commands = [
 		.setName('post-panel')
 		.setDescription('Post the ticket panel in this channel')
 		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
-	new SlashCommandBuilder()
-		.setName('sticky-set')
-		.setDescription('Keep a message pinned to the bottom of a channel')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
-		.addChannelOption((o) =>
-			o.setName('channel').setDescription('Which channel').setRequired(true).addChannelTypes(ChannelType.GuildText)
-		)
-		.addStringOption((o) => o.setName('message').setDescription('The sticky text').setRequired(true)),
-	new SlashCommandBuilder()
-		.setName('sticky-remove')
-		.setDescription('Remove the sticky from a channel')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
-		.addChannelOption((o) =>
-			o.setName('channel').setDescription('Which channel').setRequired(true).addChannelTypes(ChannelType.GuildText)
-		),
 	new SlashCommandBuilder()
 		.setName('post-verify')
 		.setDescription('Post the verification embed in this channel')
@@ -207,24 +145,9 @@ function buildVerifyPanel() {
 	return { embeds: [embed], components: [row] };
 }
 
-function buildModal(type) {
-	const modal = new ModalBuilder().setCustomId(`submit:${type.id}`).setTitle(type.label.slice(0, 45));
-	const rows = type.fields.map((field, i) =>
-		new ActionRowBuilder().addComponents(
-			new TextInputBuilder()
-				.setCustomId(`field${i}`)
-				.setLabel(field.slice(0, 45))
-				.setStyle(TextInputStyle.Short)
-				.setRequired(true)
-		)
-	);
-	modal.addComponents(...rows);
-	return modal;
-}
-
 // --=-== | Ticket creation | ==-=--
 
-async function createTicketChannel(interaction, type, answers) {
+async function createTicketChannel(interaction, type) {
 	const guild = interaction.guild;
 	const number = nextNumber(type.prefix);
 	const name = `┃${type.prefix}-${number}`;
@@ -262,10 +185,7 @@ async function createTicketChannel(interaction, type, answers) {
 		.setColor(BRAND_COLOR)
 		.setTitle(`${type.label}  —  ${number}`)
 		.setThumbnail(interaction.user.displayAvatarURL())
-		.addFields(
-			{ name: 'Opened by', value: `<@${interaction.user.id}>` },
-			...type.fields.map((field, i) => ({ name: field, value: answers[i] || '—', inline: true }))
-		)
+		.addFields({ name: 'Opened by', value: `<@${interaction.user.id}>` })
 		.setFooter({ text: 'Qualion Management' })
 		.setTimestamp();
 
@@ -289,37 +209,6 @@ async function createTicketChannel(interaction, type, answers) {
 		components: [new ActionRowBuilder().addComponents(buttons)],
 	});
 	return channel;
-}
-
-// --=-== | Sticky messages | ==-=--
-
-async function handleStickySet(interaction) {
-	const targetOption = interaction.options.getChannel('channel');
-	const channel = await interaction.guild.channels.fetch(targetOption.id);
-	const message = interaction.options.getString('message');
-	const sticky = loadJson(STICKY_FILE, {});
-
-	const existing = sticky[channel.id];
-	if (existing?.lastMessageId) {
-		await channel.messages.delete(existing.lastMessageId).catch(() => {});
-	}
-	const sent = await channel.send(message);
-	sticky[channel.id] = { message, lastMessageId: sent.id };
-	await persistSticky(sticky);
-	await interaction.reply({ content: `Sticky message set for ${channel}.`, ephemeral: true });
-}
-
-async function handleStickyRemove(interaction) {
-	const targetOption = interaction.options.getChannel('channel');
-	const channel = await interaction.guild.channels.fetch(targetOption.id);
-	const sticky = loadJson(STICKY_FILE, {});
-	const entry = sticky[channel.id];
-	if (entry?.lastMessageId) {
-		await channel.messages.delete(entry.lastMessageId).catch(() => {});
-	}
-	delete sticky[channel.id];
-	await persistSticky(sticky);
-	await interaction.reply({ content: `Sticky removed from ${channel}.`, ephemeral: true });
 }
 
 // --=-== | Clear channel | ==-=--
@@ -380,41 +269,25 @@ async function runAddTicketWizard(interaction) {
 	await interaction.reply({ content: 'Setup starting below \u2014 answer in this channel. Type cancel any time to stop.', ephemeral: true });
 
 	try {
-		const idMsg = await askInChat(channel, userId, '**Step 1/5** — short id for this type (lowercase, no spaces — e.g. `ui`, `pm`):');
+		const idMsg = await askInChat(channel, userId, '**Step 1/4** — short id for this type (lowercase, no spaces — e.g. `ui`, `pm`):');
 		if (idMsg == null) return void (await channel.send(idMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
 		const id = idMsg.content.trim().toLowerCase().replace(/\s+/g, '-');
 
-		const labelMsg = await askInChat(channel, userId, '**Step 2/5** — what should the button say? (e.g. `UI Designer`):');
+		const labelMsg = await askInChat(channel, userId, '**Step 2/4** — what should the button say? (e.g. `UI Designer`):');
 		if (labelMsg == null) return void (await channel.send(labelMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
 		const label = labelMsg.content.trim();
 
-		const prefixMsg = await askInChat(channel, userId, '**Step 3/5** — what should ticket channels be named? (e.g. `application`, `ticket`):');
+		const prefixMsg = await askInChat(channel, userId, '**Step 3/4** — what should ticket channels be named? (e.g. `application`, `ticket`):');
 		if (prefixMsg == null) return void (await channel.send(prefixMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
 		const prefix = prefixMsg.content.trim().toLowerCase().replace(/\s+/g, '-');
 
-		const roleMsg = await askInChat(channel, userId, '**Step 4/5** — mention the role to ping and grant access, or type `skip` for none:');
+		const roleMsg = await askInChat(channel, userId, '**Step 4/4** — mention the role to ping and grant access, or type `skip` for none:');
 		if (roleMsg == null) return void (await channel.send(roleMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
 		const mentionedRole = roleMsg.mentions.roles.first();
 		const roleId = mentionedRole ? mentionedRole.id : null;
 
-		await channel.send("**Step 5/5** — questions to ask applicants, one at a time. Type `done` once you've added at least one (max 5).");
-		const fields = [];
-		while (fields.length < 5) {
-			const fieldMsg = await askInChat(channel, userId, `Field ${fields.length + 1}${fields.length > 0 ? ' (or type `done`)' : ''}:`);
-			if (fieldMsg == null) return void (await channel.send(fieldMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
-			const text = fieldMsg.content.trim();
-			if (text.toLowerCase() === 'done') {
-				if (fields.length === 0) {
-					await channel.send('Need at least one field before `done` works — keep going.');
-					continue;
-				}
-				break;
-			}
-			fields.push(text);
-		}
-
 		const config = loadJson(CONFIG_FILE, {});
-		config[id] = { id, label, prefix, roleId, fields };
+		config[id] = { id, label, prefix, roleId };
 		saveJson(CONFIG_FILE, config);
 
 		const summary = new EmbedBuilder()
@@ -424,8 +297,7 @@ async function runAddTicketWizard(interaction) {
 				{ name: 'ID', value: id, inline: true },
 				{ name: 'Button', value: label, inline: true },
 				{ name: 'Prefix', value: prefix, inline: true },
-				{ name: 'Role', value: roleId ? `<@&${roleId}>` : 'None', inline: true },
-				{ name: 'Fields', value: fields.join(', ') }
+				{ name: 'Role', value: roleId ? `<@&${roleId}>` : 'None', inline: true }
 			)
 			.setFooter({ text: 'Run /post-panel to show it on the panel' });
 		await channel.send({ embeds: [summary] });
@@ -438,22 +310,7 @@ async function runAddTicketWizard(interaction) {
 
 client.once(Events.ClientReady, async () => {
 	await registerCommands();
-	await loadStickyFromDiscord();
 	console.log(`Logged in as ${client.user.tag}`);
-});
-
-client.on(Events.MessageCreate, async (message) => {
-	if (message.author.id === client.user.id) return;
-	const sticky = loadJson(STICKY_FILE, {});
-	const entry = sticky[message.channel.id];
-	if (!entry) return;
-	const previousId = entry.lastMessageId;
-	const sent = await message.channel.send(entry.message);
-	entry.lastMessageId = sent.id;
-	await persistSticky(sticky);
-	if (previousId) {
-		await message.channel.messages.delete(previousId).catch(() => {});
-	}
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -482,7 +339,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 				for (const t of types) {
 					embed.addFields({
 						name: `${t.label}  •  ${t.id}`,
-						value: `Prefix: \`${t.prefix}\`\nRole: ${t.roleId ? `<@&${t.roleId}>` : 'None'}\nFields: ${t.fields.join(', ')}`,
+						value: `Prefix: \`${t.prefix}\`\nRole: ${t.roleId ? `<@&${t.roleId}>` : 'None'}`,
 					});
 				}
 			}
@@ -528,16 +385,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 			return;
 		}
 
-		if (interaction.isChatInputCommand() && interaction.commandName === 'sticky-set') {
-			await handleStickySet(interaction);
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'sticky-remove') {
-			await handleStickyRemove(interaction);
-			return;
-		}
-
 		if (interaction.isButton() && interaction.customId === 'verify_member') {
 			if (interaction.member.roles.cache.has(MEMBER_ROLE_ID)) {
 				await interaction.reply({ content: "You're already verified.", ephemeral: true });
@@ -556,17 +403,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 				await interaction.reply({ content: 'That ticket type no longer exists.', ephemeral: true });
 				return;
 			}
-			await interaction.showModal(buildModal(type));
-			return;
-		}
-
-		if (interaction.isModalSubmit() && interaction.customId.startsWith('submit:')) {
-			const id = interaction.customId.split(':')[1];
-			const config = loadJson(CONFIG_FILE, {});
-			const type = config[id];
-			const answers = type.fields.map((_, i) => interaction.fields.getTextInputValue(`field${i}`));
 			await interaction.reply({ content: 'Ticket created, check the new channel.', ephemeral: true });
-			await createTicketChannel(interaction, type, answers);
+			await createTicketChannel(interaction, type);
 			return;
 		}
 
