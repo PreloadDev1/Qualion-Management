@@ -19,6 +19,9 @@ npm start
 ```
 Then `/post-panel` (or `/create-applications-panel`) for applications, `/post-verify` for verification, `/create-invoice-panel` for payments — each in whichever channel should hold it.
 
+## Permissions
+Every slash command checks for the actual `LEADS_ROLE_ID` role now, not Discord's Manage Server permission bit — someone could hold Manage Server without being a Lead, or be a Lead without holding it, and neither case matters anymore. Commands stay visible to everyone in the slash command list, but running one without the role gets a plain "Only Leads can use bot commands" reply instead of doing anything. Buttons regular members are meant to use — opening a ticket, verifying, requesting an invoice — aren't affected, only the `/` commands are.
+
 ## Verification
 `/post-verify` posts a green-accented embed pointing at `RULES_CHANNEL_ID`, with a **Verify** button. Clicking it grants `MEMBER_ROLE_ID` — clicking again once already verified just replies saying so, no duplicate role add. Post it once; it works from that single message from then on.
 
@@ -40,9 +43,9 @@ Channels are named `┃<prefix>-001` and so on, numbered per prefix — every `a
 `/add-employee user:<pick> channel:<pick a project channel>` grants that user View and Send access to the picked channel and posts a short note in it. Meant for onboarding someone from a ticket straight onto the project channel they'll actually work in — the channel itself still needs to exist first (create it under a Projects category same as any other channel).
 
 ## Invoices
-`/create-invoice-panel` posts a fixed panel — one button, no configuration. Clicking it creates a channel named `┃<username>-001`, numbered per person rather than shared: the count comes from how many invoice channels that exact user already has in `INVOICES_CATEGORY_ID`, so their fourth one becomes `-004` automatically. No Close button, and nothing in the code deletes these — they're meant to stay as a permanent record.
+`/create-invoice-panel` posts a fixed panel — one button, no configuration — styled green rather than the blurple applications use, so it reads as its own distinct thing at a glance. Clicking it creates a channel named `┃<username>-001`, numbered per person rather than shared: the count comes from how many invoice channels that exact user already has in `INVOICES_CATEGORY_ID`, so their fourth one becomes `-004` automatically. No Close button, and nothing in the code deletes these — they're meant to stay as a permanent record.
 
-On creation it pings Leads and the user, attaches the real template from `assets/InvoiceTemplate.docx`, and posts an embed pointing at which sections need filling in (Payee, Work, Payment, Project) — explained as something the user fills in themselves, not the bot, for the legal reason already discussed. Swap the file in `assets/` any time the template itself changes; nothing in the code needs updating to match.
+On creation it pings Leads and the user, attaches the real template from `InvoiceTemplate.docx` at the repo root, and posts an embed pointing at which sections need filling in (Payee, Work, Payment, Project) — explained as something the user fills in themselves, not the bot, for the legal reason already discussed. Swap the file at the root any time the template itself changes; nothing in the code needs updating to match.
 
 Every invoice channel also gets logged to a Turso database if `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` are set — who opened it, the channel, and a `status` column defaulting to `pending` for whenever a "mark as paid" step gets built later. The table is created automatically on first startup if it doesn't exist yet. Without both Turso vars set, invoice channels still work exactly the same, they just don't get tracked anywhere outside Discord itself.
 

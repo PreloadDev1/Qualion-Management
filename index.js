@@ -290,7 +290,7 @@ async function createInvoiceChannel(interaction) {
 		)
 		.setFooter({ text: 'Qualion Management' });
 
-	const templatePath = path.join(__dirname, 'assets', 'InvoiceTemplate.docx');
+	const templatePath = path.join(__dirname, 'InvoiceTemplate.docx');
 
 	try {
 		await channel.send({
