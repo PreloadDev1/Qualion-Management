@@ -194,6 +194,13 @@ const commands = [
 		.setName('approve-invoice')
 		.setDescription('Record this invoice channel as approved with the completed file')
 		.addAttachmentOption((o) => o.setName('invoice').setDescription('The completed invoice file').setRequired(true)),
+	new SlashCommandBuilder()
+		.setName('send-message')
+		.setDescription('Post a message as the bot in any channel')
+		.addChannelOption((o) =>
+			o.setName('channel').setDescription('Which channel').setRequired(true).addChannelTypes(ChannelType.GuildText)
+		)
+		.addStringOption((o) => o.setName('message').setDescription('What to send').setRequired(true)),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -337,15 +344,6 @@ async function createInvoiceChannel(interaction) {
 		],
 	});
 
-	const rulesMessage = await channel.send({
-		content: `<@&${LEADS_ROLE_ID}> <@${interaction.user.id}>`,
-		embeds: [new EmbedBuilder().setColor(BRAND_COLOR).setDescription(resolveEmojis(guild, COMMISSION_TERMS))],
-	});
-	await rulesMessage.pin().catch(() => {});
-
-	const tickEmoji = guild.emojis.cache.find((e) => e.name.toLowerCase() === 'tick');
-	await rulesMessage.react(tickEmoji || '✅').catch(() => {});
-
 	const invoiceEmbed = new EmbedBuilder()
 		.setColor(BRAND_COLOR)
 		.setTitle('Invoice template attached')
@@ -356,14 +354,15 @@ async function createInvoiceChannel(interaction) {
 		.setFooter({ text: 'Qualion Management' });
 
 	const templatePath = path.join(__dirname, 'InvoiceTemplate.docx');
+	const pingContent = `<@&${LEADS_ROLE_ID}> <@${interaction.user.id}>`;
 
 	try {
-		const templateMessage = await channel.send({ embeds: [invoiceEmbed], files: [templatePath] });
+		const templateMessage = await channel.send({ content: pingContent, embeds: [invoiceEmbed], files: [templatePath] });
 		await templateMessage.pin().catch(() => {});
 	} catch (err) {
 		console.log(`Invoice template attachment failed (${templatePath}): ${err.message}`);
 		const fallbackMessage = await channel.send({
-			content: "⚠️ The template file couldn't be attached — check with a Lead.",
+			content: `${pingContent}\n\n⚠️ The template file couldn't be attached — check with a Lead.`,
 			embeds: [invoiceEmbed],
 		});
 		await fallbackMessage.pin().catch(() => {});
@@ -721,6 +720,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
 				],
 			});
 			await interaction.reply({ content: `Marked ${displayName} as approved.`, ephemeral: true });
+			return;
+		}
+
+		if (interaction.isChatInputCommand() && interaction.commandName === 'send-message') {
+			const targetOption = interaction.options.getChannel('channel');
+			const channel = await interaction.guild.channels.fetch(targetOption.id);
+			const resolved = resolveEmojis(interaction.guild, interaction.options.getString('message'));
+
+			if (resolved.length > 2000) {
+				await interaction.reply({
+					content: `That message is ${resolved.length} characters — Discord's limit is 2000. Trim it and try again.`,
+					ephemeral: true,
+				});
+				return;
+			}
+
+			await channel.send(resolved);
+			await interaction.reply({ content: `Sent to ${channel}.`, ephemeral: true });
 			return;
 		}
 
