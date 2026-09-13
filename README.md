@@ -47,5 +47,10 @@ The bot needs to actually have access to whatever channel gets picked, and to th
 ## Numbering and config persistence
 `counter.json`, `config.json`, and `sticky.json` all live next to the script. On a host with no persistent disk (Render's free tier, for one), all three reset to what's shipped in the repo on every redeploy — live changes made through commands don't survive a redeploy unless the host has a volume, or the change also gets committed.
 
+## Clear channel
+`/clear-channel channel:<pick> confirm:CONFIRM` deletes every message in the picked channel. The `confirm` field has to be exactly `CONFIRM`, capitals included — anything else, including leaving it blank, just explains what the command does without touching anything. There's no undo once it runs.
+
+Messages under 14 days old go in fast batches. Anything older has to be removed one at a time — a Discord API limit, not something the code can speed up — so an old, message-heavy channel can take a while. The command replies once it's actually finished, with a count of how many were removed.
+
 ## Hosting
 A host needs to stay running for this to work continuously. Set `RENDER_URL` to the service's own `.onrender.com` address and the bot pings itself every 4 minutes from the outside in, which is what actually resets Render's idle timer — an external monitor like UptimeRobot did the same job before this existed, and isn't needed anymore once `RENDER_URL` is set. Leaving both running isn't harmful, just redundant.

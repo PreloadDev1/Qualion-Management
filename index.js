@@ -154,6 +154,16 @@ const commands = [
 		.setName('post-verify')
 		.setDescription('Post the verification embed in this channel')
 		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+	new SlashCommandBuilder()
+		.setName('clear-channel')
+		.setDescription('Delete every message in a channel \u2014 irreversible')
+		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
+		.addChannelOption((o) =>
+			o.setName('channel').setDescription('Which channel to wipe').setRequired(true).addChannelTypes(ChannelType.GuildText)
+		)
+		.addStringOption((o) =>
+			o.setName('confirm').setDescription('Type CONFIRM exactly to actually do this').setRequired(true)
+		),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -321,6 +331,34 @@ async function handleStickyRemove(interaction) {
 	await interaction.reply({ content: `Sticky removed from ${channel}.`, ephemeral: true });
 }
 
+// --=-== | Clear channel | ==-=--
+
+async function clearChannel(channel) {
+	let totalDeleted = 0;
+	let fetched;
+	do {
+		fetched = await channel.messages.fetch({ limit: 100 });
+		if (fetched.size === 0) break;
+
+		if (fetched.size === 1) {
+			await fetched.first().delete().catch(() => {});
+			totalDeleted += 1;
+			break;
+		}
+
+		const deleted = await channel.bulkDelete(fetched, true).catch(() => new Map());
+		totalDeleted += deleted.size;
+
+		const remaining = fetched.filter((m) => !deleted.has(m.id));
+		for (const msg of remaining.values()) {
+			await msg.delete().catch(() => {});
+			totalDeleted += 1;
+			await new Promise((r) => setTimeout(r, 1000));
+		}
+	} while (fetched.size >= 2);
+	return totalDeleted;
+}
+
 // --=-== | Events | ==-=--
 
 client.once(Events.ClientReady, async () => {
@@ -405,6 +443,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
 			}
 			await interaction.channel.send(panel);
 			await interaction.reply({ content: 'Panel posted.', ephemeral: true });
+			return;
+		}
+
+		if (interaction.isChatInputCommand() && interaction.commandName === 'clear-channel') {
+			const confirm = interaction.options.getString('confirm');
+			if (confirm !== 'CONFIRM') {
+				await interaction.reply({
+					content: 'Not run — type CONFIRM exactly in the confirm field to actually wipe the channel. This cannot be undone.',
+					ephemeral: true,
+				});
+				return;
+			}
+			const targetOption = interaction.options.getChannel('channel');
+			const channel = await interaction.guild.channels.fetch(targetOption.id);
+			await interaction.deferReply({ ephemeral: true });
+			const deletedCount = await clearChannel(channel);
+			await interaction.editReply(`Deleted ${deletedCount} message(s) from ${channel}.`);
 			return;
 		}
 
