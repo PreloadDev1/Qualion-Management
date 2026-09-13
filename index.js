@@ -29,6 +29,7 @@ const {
 	LEADS_ROLE_ID,
 	MEMBER_ROLE_ID,
 	RULES_CHANNEL_ID,
+	STORAGE_CHANNEL_ID,
 } = process.env;
 
 const BRAND_COLOR = 0x5865f2;
@@ -47,6 +48,48 @@ function loadJson(file, fallback) {
 
 function saveJson(file, data) {
 	fs.writeFileSync(file, JSON.stringify(data, null, 2));
+}
+
+// --=-== | Sticky persistence via Discord (survives disk resets) | ==-=--
+
+let stickyStoreMessageId = null;
+
+async function loadStickyFromDiscord() {
+	if (!STORAGE_CHANNEL_ID) return;
+	try {
+		const channel = await client.channels.fetch(STORAGE_CHANNEL_ID);
+		const pins = await channel.messages.fetchPinned();
+		const stored = pins.find((m) => m.author.id === client.user.id);
+		if (stored) {
+			stickyStoreMessageId = stored.id;
+			const raw = stored.content.replace(/^```json\n|\n```$/g, '');
+			saveJson(STICKY_FILE, JSON.parse(raw));
+			console.log('Sticky data restored from storage channel.');
+		}
+	} catch (err) {
+		console.log(`Sticky restore failed: ${err.message}`);
+	}
+}
+
+async function persistSticky(sticky) {
+	saveJson(STICKY_FILE, sticky);
+	if (!STORAGE_CHANNEL_ID) return;
+	try {
+		const channel = await client.channels.fetch(STORAGE_CHANNEL_ID);
+		const content = '```json\n' + JSON.stringify(sticky) + '\n```';
+		if (stickyStoreMessageId) {
+			const msg = await channel.messages.fetch(stickyStoreMessageId).catch(() => null);
+			if (msg) {
+				await msg.edit(content);
+				return;
+			}
+		}
+		const sent = await channel.send(content);
+		await sent.pin().catch(() => {});
+		stickyStoreMessageId = sent.id;
+	} catch (err) {
+		console.log(`Sticky persist failed: ${err.message}`);
+	}
 }
 
 function nextNumber(prefix) {
@@ -261,7 +304,7 @@ async function handleStickySet(interaction) {
 	}
 	const sent = await channel.send(message);
 	sticky[channel.id] = { message, lastMessageId: sent.id };
-	saveJson(STICKY_FILE, sticky);
+	await persistSticky(sticky);
 	await interaction.reply({ content: `Sticky message set for ${channel}.`, ephemeral: true });
 }
 
@@ -274,7 +317,7 @@ async function handleStickyRemove(interaction) {
 		await channel.messages.delete(entry.lastMessageId).catch(() => {});
 	}
 	delete sticky[channel.id];
-	saveJson(STICKY_FILE, sticky);
+	await persistSticky(sticky);
 	await interaction.reply({ content: `Sticky removed from ${channel}.`, ephemeral: true });
 }
 
@@ -282,6 +325,7 @@ async function handleStickyRemove(interaction) {
 
 client.once(Events.ClientReady, async () => {
 	await registerCommands();
+	await loadStickyFromDiscord();
 	console.log(`Logged in as ${client.user.tag}`);
 });
 
@@ -290,12 +334,13 @@ client.on(Events.MessageCreate, async (message) => {
 	const sticky = loadJson(STICKY_FILE, {});
 	const entry = sticky[message.channel.id];
 	if (!entry) return;
-	if (entry.lastMessageId) {
-		await message.channel.messages.delete(entry.lastMessageId).catch(() => {});
-	}
+	const previousId = entry.lastMessageId;
 	const sent = await message.channel.send(entry.message);
 	entry.lastMessageId = sent.id;
-	saveJson(STICKY_FILE, sticky);
+	await persistSticky(sticky);
+	if (previousId) {
+		await message.channel.messages.delete(previousId).catch(() => {});
+	}
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {

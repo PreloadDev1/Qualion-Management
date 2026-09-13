@@ -36,11 +36,13 @@ Each open ticket gets a Close button, and an Approve button too if the type has 
 Channels are named `┃<prefix>-001` and so on, numbered per prefix rather than per type — every `application` ticket shares one counter regardless of discipline. Drop the `┃` from `createTicketChannel` in the code if it doesn't render the way you want.
 
 ## Sticky messages
-`/sticky-set channel:<pick any text channel> message:<text>` keeps that message pinned to the bottom of the picked channel — any new message posted there makes the bot delete its old sticky and repost it underneath, so it's always the first thing anyone sees. Runs from anywhere, including an admin-only channel like #commands, since the target is a picker option. `/sticky-remove channel:<pick>` clears it.
+`/sticky-set channel:<pick any text channel> message:<text>` keeps that message pinned to the bottom of the picked channel. On any new message there, the bot sends the sticky again immediately, then cleans up the old copy right after — no gap where nothing's showing. `/sticky-remove channel:<pick>` clears it.
+
+Sticky data now survives restarts and redeploys, not just this session. Set `STORAGE_CHANNEL_ID` to a private channel the bot can see (create one, keep it hidden from everyone else, doesn't need to be visible to Leads either) and every sticky change gets written there too, as a pinned message the bot reads back on startup. Without `STORAGE_CHANNEL_ID` set, sticky still works, it just goes back to resetting on every redeploy like `config.json` and `counter.json` still do — this same trick could cover those two as well if that becomes worth fixing later, just not done yet since it wasn't what was asked.
 
 Forums aren't supported here on purpose — they already have their own pinned-posts feature built into Discord, so a bot-managed sticky would just duplicate that.
 
-The bot needs to actually have access to whatever channel gets picked — if it can't view or send there, the command fails even though picking it from the dropdown works fine.
+The bot needs to actually have access to whatever channel gets picked, and to the storage channel — if it can't view or send there, the relevant command fails even though picking it from the dropdown works fine.
 
 ## Numbering and config persistence
 `counter.json`, `config.json`, and `sticky.json` all live next to the script. On a host with no persistent disk (Render's free tier, for one), all three reset to what's shipped in the repo on every redeploy — live changes made through commands don't survive a redeploy unless the host has a volume, or the change also gets committed.
