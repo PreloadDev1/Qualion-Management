@@ -93,6 +93,10 @@ const commands = [
 		.addStringOption((o) =>
 			o.setName('confirm').setDescription('Type CONFIRM exactly to actually do this').setRequired(true)
 		),
+	new SlashCommandBuilder()
+		.setName('create-applications-panel')
+		.setDescription('Build a ticket type for every #607d8b role and post the panel here')
+		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -376,6 +380,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
 			await interaction.deferReply({ ephemeral: true });
 			const deletedCount = await clearChannel(channel);
 			await interaction.editReply(`Deleted ${deletedCount} message(s) from ${channel}.`);
+			return;
+		}
+
+		if (interaction.isChatInputCommand() && interaction.commandName === 'create-applications-panel') {
+			await interaction.guild.roles.fetch();
+			const matchingRoles = interaction.guild.roles.cache.filter((r) => r.hexColor === '#607d8b');
+			if (matchingRoles.size === 0) {
+				await interaction.reply({ content: 'No roles with color #607d8b found.', ephemeral: true });
+				return;
+			}
+
+			const config = loadJson(CONFIG_FILE, {});
+			for (const role of matchingRoles.values()) {
+				const id = role.name.trim().toLowerCase().replace(/\s+/g, '-');
+				config[id] = { id, label: role.name, prefix: 'application', roleId: role.id };
+			}
+			saveJson(CONFIG_FILE, config);
+
+			await interaction.channel.send(buildPanel(config));
+			await interaction.reply({
+				content: `Added/updated ${matchingRoles.size} ticket type(s) from role color and posted the panel.`,
+				ephemeral: true,
+			});
 			return;
 		}
 

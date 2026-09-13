@@ -25,9 +25,11 @@ Then `/post-panel` in whichever channel should hold the ticket panel, and `/post
 ## Ticket types
 Buttons live in `config.json`, not code. Pre-filled with four disciplines (UI, Scripting, VFX, Building) — clicking a button now creates the ticket channel immediately, no form first.
 
-`/add-ticket-type` takes no options — it asks three short questions in the channel instead: the id, the button label, the channel prefix, then a role to mention (or `skip`). Type `cancel` at any point to stop, or just stop answering — it gives up after two minutes of silence. `/remove-ticket-type id:<short-id>` deletes one. `/list-ticket-types` shows everything currently configured, as an embed. Re-run `/post-panel` after adding or removing a type — an existing posted panel doesn't update itself.
+`/create-applications-panel` is the fast path: it scans every role in the server for color `#607d8b`, builds or updates a ticket type for each one automatically (id from the role name, prefix `application`, that role pinged and granted access), then posts the panel in whatever channel the command was run in — all in one step. Safe to re-run any time a grey role gets added, renamed, or recolored; it just overwrites the matching entries and posts a fresh panel. Old panel messages from before a re-run don't delete themselves, so it's worth clearing out a stale one if several pile up.
 
-This still needs Message Content Intent turned on in the Developer Portal (Bot → Privileged Gateway Intents) for the setup wizard to read your answers — same requirement as before, not something new from this change.
+`/add-ticket-type` still exists for anything that isn't a grey-role discipline — takes no options, asks the id, button label, channel prefix, and a role (or `skip`) in the channel instead. `/remove-ticket-type id:<short-id>` deletes one, from either path. `/list-ticket-types` shows everything currently configured, as an embed. `/post-panel` re-posts the panel from whatever's in `config.json` right now, without touching role colors at all.
+
+This still needs Message Content Intent turned on in the Developer Portal (Bot → Privileged Gateway Intents) for `/add-ticket-type`'s wizard to read chat answers — not required for `/create-applications-panel`, which reads role data instead.
 
 ## Ticket channels
 Each open ticket gets a Close button, and an Approve button too if the type has a role attached. Approve grants that role to whoever opened the ticket and posts a confirmation — it doesn't close the channel, that's still a separate step. Close is Leads-only and deletes the channel after five seconds.
