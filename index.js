@@ -4,6 +4,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const { createClient } = require('@libsql/client');
+const emoji = require('node-emoji');
 const {
 	Client,
 	GatewayIntentBits,
@@ -116,6 +117,9 @@ async function ensureInvoiceTable() {
 				created_at TEXT NOT NULL DEFAULT (datetime('now'))
 			)
 		`);
+		// Older tables won't have these yet — add them, ignore the error if they're already there.
+		await turso.execute('ALTER TABLE invoices ADD COLUMN approved_invoice_url TEXT').catch(() => {});
+		await turso.execute('ALTER TABLE invoices ADD COLUMN approved_at TEXT').catch(() => {});
 	} catch (err) {
 		console.log(`Invoice table setup failed: ${err.message}`);
 	}
@@ -186,6 +190,10 @@ const commands = [
 	new SlashCommandBuilder()
 		.setName('create-invoice-panel')
 		.setDescription('Post the payment ticket panel in this channel'),
+	new SlashCommandBuilder()
+		.setName('approve-invoice')
+		.setDescription('Record this invoice channel as approved with the completed file')
+		.addAttachmentOption((o) => o.setName('invoice').setDescription('The completed invoice file').setRequired(true)),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -254,6 +262,54 @@ function buildInvoicePanel() {
 	return { embeds: [embed], components: [row] };
 }
 
+// --=-== | Emoji resolution | ==-=--
+
+function resolveEmojis(guild, text) {
+	const withCustom = text.replace(/:([a-zA-Z0-9_]+)(~\d+)?:/g, (match, name) => {
+		const found = guild.emojis.cache.find((e) => e.name.toLowerCase() === name.toLowerCase());
+		return found ? found.toString() : match;
+	});
+	return emoji.emojify(withCustom);
+}
+
+const COMMISSION_TERMS = `# :clipboard: Commission terms & server rules :ballot_box_with_check:
+-# Taking a job here means you accept these. Nothing below is negotiable except where it says so.
+
+### :cash: 1. No upfront by default
+I don't pay upfront. If we've worked together before and it went well, we can talk about an upfront of up to 30%. First-time work is paid on delivery.
+
+### :hourglass_flowing_sand: 2. Deadlines
+A missed deadline on your side becomes a missed deadline on mine, and that lands on me. If something comes up and the date is at risk, tell me before it passes.
+> Telling me in advance is never a problem. Staying quiet until the day itself is.
+
+### :receipt: 3. Invoices are required
+I'm registered as a company, so every payment needs a receipt. **No invoice, no payment.** That's bookkeeping I can't skip.
+If you've never written one, use the template pinned below this message. Fill in:
+- Receiver information (your name or company, address, tax ID if you have one)
+- Payment type (PayPal, bank transfer, crypto, etc.)
+- Amount and currency
+- Date and a short description of the work
+
+### :ghostball: 4. Abandonment
+If the deadline passes and I haven't heard from you, the job is treated as abandoned and it doesn't get paid.
+-# This only applies after the deadline with no contact. Being late while keeping me updated is a different thing and we sort that out normally.
+
+### :Timer: 5. Updates every 2 days
+Post a short update in your project channel at least every second day:
+- What you finished
+- What you're working on next
+- Anything blocking you, and any questions
+
+Two lines is enough. I'd rather have *"nothing new today, still on the UI"* than nothing at all.
+
+### :chatting: 6. Keep it in the project channel
+Every job gets its own channel. Files, questions, progress and decisions go there, not in DMs. That way nothing gets lost and anyone who needs to check the status can.
+
+**Please react with a :tick: after reading!**
+-# Last updated 13.09.2026 · questions about any of this go in <#1548425329062969346> and ping us!`;
+
+// --=-== | Invoice channel creation | ==-=--
+
 async function createInvoiceChannel(interaction) {
 	const guild = interaction.guild;
 	const category = await guild.channels.fetch(INVOICES_CATEGORY_ID);
@@ -281,6 +337,15 @@ async function createInvoiceChannel(interaction) {
 		],
 	});
 
+	const rulesMessage = await channel.send({
+		content: `<@&${LEADS_ROLE_ID}> <@${interaction.user.id}>`,
+		embeds: [new EmbedBuilder().setColor(BRAND_COLOR).setDescription(resolveEmojis(guild, COMMISSION_TERMS))],
+	});
+	await rulesMessage.pin().catch(() => {});
+
+	const tickEmoji = guild.emojis.cache.find((e) => e.name.toLowerCase() === 'tick');
+	await rulesMessage.react(tickEmoji || '✅').catch(() => {});
+
 	const invoiceEmbed = new EmbedBuilder()
 		.setColor(BRAND_COLOR)
 		.setTitle('Invoice template attached')
@@ -293,17 +358,15 @@ async function createInvoiceChannel(interaction) {
 	const templatePath = path.join(__dirname, 'InvoiceTemplate.docx');
 
 	try {
-		await channel.send({
-			content: `<@&${LEADS_ROLE_ID}> <@${interaction.user.id}>`,
-			embeds: [invoiceEmbed],
-			files: [templatePath],
-		});
+		const templateMessage = await channel.send({ embeds: [invoiceEmbed], files: [templatePath] });
+		await templateMessage.pin().catch(() => {});
 	} catch (err) {
 		console.log(`Invoice template attachment failed (${templatePath}): ${err.message}`);
-		await channel.send({
-			content: `<@&${LEADS_ROLE_ID}> <@${interaction.user.id}>\n\n⚠️ The template file couldn't be attached — check with a Lead.`,
+		const fallbackMessage = await channel.send({
+			content: "⚠️ The template file couldn't be attached — check with a Lead.",
 			embeds: [invoiceEmbed],
 		});
+		await fallbackMessage.pin().catch(() => {});
 	}
 
 	await recordInvoice(channel, name, interaction.user);
@@ -617,6 +680,47 @@ client.on(Events.InteractionCreate, async (interaction) => {
 		if (interaction.isChatInputCommand() && interaction.commandName === 'create-invoice-panel') {
 			await interaction.channel.send(buildInvoicePanel());
 			await interaction.reply({ content: 'Invoice panel posted.', ephemeral: true });
+			return;
+		}
+
+		if (interaction.isChatInputCommand() && interaction.commandName === 'approve-invoice') {
+			const channel = interaction.channel;
+			if (channel.parentId !== INVOICES_CATEGORY_ID) {
+				await interaction.reply({ content: 'This only works inside an invoice channel.', ephemeral: true });
+				return;
+			}
+
+			const attachment = interaction.options.getAttachment('invoice');
+			const raw = channel.name.replace(/^┃/, '');
+			const match = raw.match(/^(.+)-(\d{3})$/);
+			const displayName = match ? `${match[1].charAt(0).toUpperCase()}${match[1].slice(1)} - ${match[2]}` : raw;
+
+			if (turso) {
+				try {
+					const result = await turso.execute({
+						sql: "UPDATE invoices SET status = 'approved', approved_invoice_url = ?, approved_at = datetime('now') WHERE channel_id = ?",
+						args: [attachment.url, channel.id],
+					});
+					if (result.rowsAffected === 0) {
+						await turso.execute({
+							sql: "INSERT INTO invoices (discord_user_id, discord_username, channel_id, channel_name, status, approved_invoice_url, approved_at) VALUES (?, ?, ?, ?, 'approved', ?, datetime('now'))",
+							args: [interaction.user.id, interaction.user.username, channel.id, displayName, attachment.url],
+						});
+					}
+				} catch (err) {
+					console.log(`Invoice approval DB update failed: ${err.message}`);
+				}
+			}
+
+			await channel.send({
+				embeds: [
+					new EmbedBuilder()
+						.setColor(GREEN_COLOR)
+						.setTitle('✅ Invoice approved')
+						.setDescription(`Recorded as **${displayName}**.\n\n[View the submitted invoice](${attachment.url})`),
+				],
+			});
+			await interaction.reply({ content: `Marked ${displayName} as approved.`, ephemeral: true });
 			return;
 		}
 
