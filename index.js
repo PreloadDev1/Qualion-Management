@@ -97,6 +97,13 @@ const commands = [
 		.setName('create-applications-panel')
 		.setDescription('Build a ticket type for every #607d8b role and post the panel here')
 		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+	new SlashCommandBuilder()
+		.setName('clear-ticket-types')
+		.setDescription('Remove every configured ticket type at once')
+		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
+		.addStringOption((o) =>
+			o.setName('confirm').setDescription('Type CONFIRM exactly to actually do this').setRequired(true)
+		),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -401,6 +408,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
 			await interaction.channel.send(buildPanel(config));
 			await interaction.reply({
 				content: `Added/updated ${matchingRoles.size} ticket type(s) from role color and posted the panel.`,
+				ephemeral: true,
+			});
+			return;
+		}
+
+		if (interaction.isChatInputCommand() && interaction.commandName === 'clear-ticket-types') {
+			const confirm = interaction.options.getString('confirm');
+			if (confirm !== 'CONFIRM') {
+				await interaction.reply({
+					content: 'Not run — type CONFIRM exactly in the confirm field to actually clear every ticket type.',
+					ephemeral: true,
+				});
+				return;
+			}
+			const config = loadJson(CONFIG_FILE, {});
+			const count = Object.keys(config).length;
+			saveJson(CONFIG_FILE, {});
+			await interaction.reply({
+				content: `Removed all ${count} ticket type(s). Any already-posted panel keeps its old buttons until it's deleted and reposted.`,
 				ephemeral: true,
 			});
 			return;
