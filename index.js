@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { createClient } = require('@libsql/client');
 const {
 	Client,
 	GatewayIntentBits,
@@ -26,6 +27,8 @@ const {
 	LEADS_ROLE_ID,
 	MEMBER_ROLE_ID,
 	RULES_CHANNEL_ID,
+	STORAGE_CHANNEL_ID,
+	INVOICES_CATEGORY_ID,
 } = process.env;
 
 const BRAND_COLOR = 0x5865f2;
@@ -45,12 +48,89 @@ function saveJson(file, data) {
 	fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
-function nextNumber(prefix) {
+let counterStoreMessageId = null;
+
+async function loadCounterFromDiscord() {
+	if (!STORAGE_CHANNEL_ID) return;
+	try {
+		const channel = await client.channels.fetch(STORAGE_CHANNEL_ID);
+		const pins = await channel.messages.fetchPinned();
+		const stored = pins.find((m) => m.author.id === client.user.id && m.content.includes('COUNTER'));
+		if (stored) {
+			counterStoreMessageId = stored.id;
+			const raw = stored.content.replace(/^COUNTER```json\n|\n```$/g, '');
+			saveJson(COUNTER_FILE, JSON.parse(raw));
+			console.log('Ticket counter restored from storage channel.');
+		}
+	} catch (err) {
+		console.log(`Counter restore failed: ${err.message}`);
+	}
+}
+
+async function persistCounter(counters) {
+	saveJson(COUNTER_FILE, counters);
+	if (!STORAGE_CHANNEL_ID) return;
+	try {
+		const channel = await client.channels.fetch(STORAGE_CHANNEL_ID);
+		const content = 'COUNTER```json\n' + JSON.stringify(counters) + '\n```';
+		if (counterStoreMessageId) {
+			const msg = await channel.messages.fetch(counterStoreMessageId).catch(() => null);
+			if (msg) {
+				await msg.edit(content);
+				return;
+			}
+		}
+		const sent = await channel.send(content);
+		await sent.pin().catch(() => {});
+		counterStoreMessageId = sent.id;
+	} catch (err) {
+		console.log(`Counter persist failed: ${err.message}`);
+	}
+}
+
+async function nextNumber(prefix) {
 	const counters = loadJson(COUNTER_FILE, {});
 	const next = (counters[prefix] || 0) + 1;
 	counters[prefix] = next;
-	saveJson(COUNTER_FILE, counters);
+	await persistCounter(counters);
 	return String(next).padStart(3, '0');
+}
+
+// --=-== | Invoice database (Turso) | ==-=--
+
+const turso = process.env.TURSO_DATABASE_URL
+	? createClient({ url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN })
+	: null;
+
+async function ensureInvoiceTable() {
+	if (!turso) return;
+	try {
+		await turso.execute(`
+			CREATE TABLE IF NOT EXISTS invoices (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				discord_user_id TEXT NOT NULL,
+				discord_username TEXT NOT NULL,
+				channel_id TEXT NOT NULL,
+				channel_name TEXT NOT NULL,
+				status TEXT NOT NULL DEFAULT 'pending',
+				created_at TEXT NOT NULL DEFAULT (datetime('now'))
+			)
+		`);
+	} catch (err) {
+		console.log(`Invoice table setup failed: ${err.message}`);
+	}
+}
+
+async function recordInvoice(channel, name, user) {
+	if (!turso) return;
+	try {
+		await turso.execute({
+			sql: 'INSERT INTO invoices (discord_user_id, discord_username, channel_id, channel_name) VALUES (?, ?, ?, ?)',
+			args: [user.id, user.username, channel.id, name],
+		});
+	} catch (err) {
+		console.log(`Invoice record failed: ${err.message}`);
+	}
 }
 
 // --=-== | Client | ==-=--
@@ -104,6 +184,18 @@ const commands = [
 		.addStringOption((o) =>
 			o.setName('confirm').setDescription('Type CONFIRM exactly to actually do this').setRequired(true)
 		),
+	new SlashCommandBuilder()
+		.setName('add-employee')
+		.setDescription('Give a user access to a project channel')
+		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
+		.addUserOption((o) => o.setName('user').setDescription('Who to add').setRequired(true))
+		.addChannelOption((o) =>
+			o.setName('channel').setDescription('Which project channel').setRequired(true).addChannelTypes(ChannelType.GuildText)
+		),
+	new SlashCommandBuilder()
+		.setName('create-invoice-panel')
+		.setDescription('Post the payment ticket panel in this channel')
+		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -156,11 +248,74 @@ function buildVerifyPanel() {
 	return { embeds: [embed], components: [row] };
 }
 
+// --=-== | Invoices | ==-=--
+
+function buildInvoicePanel() {
+	const embed = new EmbedBuilder()
+		.setColor(BRAND_COLOR)
+		.setTitle('Request a payment')
+		.setDescription('Create a ticket for payment. A private channel opens with your name on it, kept on record — it never gets closed or deleted.')
+		.setFooter({ text: 'Qualion Management' });
+
+	const row = new ActionRowBuilder().addComponents(
+		new ButtonBuilder().setCustomId('open_invoice').setLabel('Create Invoice').setStyle(ButtonStyle.Primary)
+	);
+
+	return { embeds: [embed], components: [row] };
+}
+
+async function createInvoiceChannel(interaction) {
+	const guild = interaction.guild;
+	const category = await guild.channels.fetch(INVOICES_CATEGORY_ID);
+	await guild.channels.fetch();
+	const slug = interaction.user.username.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
+	const existing = category.children.cache.filter((c) => c.name.startsWith(`┃${slug}-`));
+	const number = String(existing.size + 1).padStart(3, '0');
+	const name = `┃${slug}-${number}`;
+
+	const channel = await guild.channels.create({
+		name,
+		type: ChannelType.GuildText,
+		parent: INVOICES_CATEGORY_ID,
+		permissionOverwrites: [
+			{ id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+			{
+				id: interaction.user.id,
+				allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
+			},
+			{
+				id: LEADS_ROLE_ID,
+				allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
+			},
+		],
+	});
+
+	await channel.send({
+		content: `<@&${LEADS_ROLE_ID}> <@${interaction.user.id}>`,
+		embeds: [
+			new EmbedBuilder()
+				.setColor(BRAND_COLOR)
+				.setTitle('Invoice template attached')
+				.setDescription(
+					"We're not able to fill this in on your behalf for legal reasons — please complete it yourself.\n\n" +
+						'Fill in your details under **Payee**, list what was delivered under **Work** with quantity and rate, fill in **Payment** with how you want to be paid, and note the project under **Project**. Post the completed file back in this channel once it\'s ready — a Lead will review and process it from here.'
+				)
+				.setFooter({ text: 'Qualion Management' }),
+		],
+		files: [path.join(__dirname, 'assets', 'InvoiceTemplate.docx')],
+	});
+
+	await recordInvoice(channel, name, interaction.user);
+
+	return channel;
+}
+
 // --=-== | Ticket creation | ==-=--
 
 async function createTicketChannel(interaction, type) {
 	const guild = interaction.guild;
-	const number = nextNumber(type.prefix);
+	const number = await nextNumber(type.prefix);
 	const name = `┃${type.prefix}-${number}`;
 
 	const overwrites = [
@@ -321,6 +476,8 @@ async function runAddTicketWizard(interaction) {
 
 client.once(Events.ClientReady, async () => {
 	await registerCommands();
+	await loadCounterFromDiscord();
+	await ensureInvoiceTable();
 	console.log(`Logged in as ${client.user.tag}`);
 });
 
@@ -435,6 +592,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
 		if (interaction.isChatInputCommand() && interaction.commandName === 'post-verify') {
 			await interaction.channel.send(buildVerifyPanel());
 			await interaction.reply({ content: 'Verification panel posted.', ephemeral: true });
+			return;
+		}
+
+		if (interaction.isChatInputCommand() && interaction.commandName === 'add-employee') {
+			const user = interaction.options.getUser('user');
+			const targetOption = interaction.options.getChannel('channel');
+			const channel = await interaction.guild.channels.fetch(targetOption.id);
+			await channel.permissionOverwrites.edit(user.id, {
+				ViewChannel: true,
+				SendMessages: true,
+				ReadMessageHistory: true,
+			});
+			await channel.send(`<@${user.id}> has been added to this project.`);
+			await interaction.reply({ content: `Added <@${user.id}> to ${channel}.`, ephemeral: true });
+			return;
+		}
+
+		if (interaction.isChatInputCommand() && interaction.commandName === 'create-invoice-panel') {
+			await interaction.channel.send(buildInvoicePanel());
+			await interaction.reply({ content: 'Invoice panel posted.', ephemeral: true });
+			return;
+		}
+
+		if (interaction.isButton() && interaction.customId === 'open_invoice') {
+			await interaction.reply({ content: 'Invoice channel created, check below.', ephemeral: true });
+			await createInvoiceChannel(interaction);
 			return;
 		}
 
