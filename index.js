@@ -430,8 +430,7 @@ async function createTicketChannel(interaction, type) {
 	}
 	buttons.push(new ButtonBuilder().setCustomId('close_ticket').setLabel('Close ticket').setStyle(ButtonStyle.Danger));
 
-	const pingParts = [`<@&${LEADS_ROLE_ID}>`];
-	if (type.roleId) pingParts.push(`<@&${type.roleId}>`);
+	const pingParts = [`<@&${LEADS_ROLE_ID}>`, `<@${interaction.user.id}>`];
 
 	await channel.send({
 		content: pingParts.join(' '),
