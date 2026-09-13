@@ -23,12 +23,11 @@ Then `/post-panel` in whichever channel should hold the ticket panel, and `/post
 `/post-verify` posts a green-accented embed pointing at `RULES_CHANNEL_ID`, with a **Verify** button. Clicking it grants `MEMBER_ROLE_ID` — clicking again once already verified just replies saying so, no duplicate role add. Post it once in whatever the entry channel is; it works from that single message from then on, nothing to re-run unless the message gets deleted.
 
 ## Ticket types
-Buttons and fields live in `config.json`, not code. Pre-filled with a general ticket and four disciplines (UI, Scripting, VFX, Building), each asking Portfolio, Pricing, Availability.
+Buttons and fields live in `config.json`, not code. Pre-filled with four disciplines (UI, Scripting, VFX, Building), each asking Portfolio, Pricing, Availability.
 
-```
-/add-ticket-type id:<short-id> label:<button text> prefix:<channel-prefix> field1:<question> role:<optional role> field2:<optional> field3:<optional> field4:<optional> field5:<optional>
-```
-Up to 5 fields (Discord's modal limit). Leave `role` off for a type that should only reach Leads. `/remove-ticket-type id:<short-id>` deletes one. `/list-ticket-types` shows everything currently configured, as an embed. Re-run `/post-panel` after adding or removing a type — an existing posted panel doesn't update itself.
+`/add-ticket-type` takes no options — it starts a short back-and-forth right in the channel instead. It asks for the id, the button label, the channel prefix, a role to mention (or `skip`), then fields one at a time until `done` is typed (up to 5, Discord's modal limit). Type `cancel` at any point to stop, or just stop answering — it gives up after two minutes of silence. `/remove-ticket-type id:<short-id>` deletes one, still a plain command since there's nothing to walk through. `/list-ticket-types` shows everything currently configured, as an embed. Re-run `/post-panel` after adding or removing a type — an existing posted panel doesn't update itself.
+
+**This needs one thing turned on that wasn't needed before:** Developer Portal → your app → Bot → Privileged Gateway Intents → turn on **Message Content Intent**. Without it, the bot receives an empty string for every answer typed during setup, and the wizard breaks silently rather than with an obvious error. Fine to enable at this server's size — that toggle only requires Discord's review process once a bot is in 100+ servers, and this one isn't.
 
 ## Ticket channels
 Each open ticket gets a Close button, and an Approve button too if the type has a role attached. Approve grants that role to whoever opened the ticket and posts a confirmation — it doesn't close the channel, that's still a separate step. Close is Leads-only and deletes the channel after five seconds.

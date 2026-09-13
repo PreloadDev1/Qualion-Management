@@ -103,7 +103,7 @@ function nextNumber(prefix) {
 // --=-== | Client | ==-=--
 
 const client = new Client({
-	intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+	intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
 // --=-== | Slash commands | ==-=--
@@ -111,17 +111,8 @@ const client = new Client({
 const commands = [
 	new SlashCommandBuilder()
 		.setName('add-ticket-type')
-		.setDescription('Add or update a ticket type button')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
-		.addStringOption((o) => o.setName('id').setDescription('Short id, e.g. ui').setRequired(true))
-		.addStringOption((o) => o.setName('label').setDescription('Button label').setRequired(true))
-		.addStringOption((o) => o.setName('prefix').setDescription('Channel prefix, e.g. application or ticket').setRequired(true))
-		.addStringOption((o) => o.setName('field1').setDescription('First field label').setRequired(true))
-		.addRoleOption((o) => o.setName('role').setDescription('Role to ping, grant access, and approve into'))
-		.addStringOption((o) => o.setName('field2').setDescription('Second field label'))
-		.addStringOption((o) => o.setName('field3').setDescription('Third field label'))
-		.addStringOption((o) => o.setName('field4').setDescription('Fourth field label'))
-		.addStringOption((o) => o.setName('field5').setDescription('Fifth field label')),
+		.setDescription('Set up a new ticket type by answering questions in chat')
+		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
 	new SlashCommandBuilder()
 		.setName('remove-ticket-type')
 		.setDescription('Remove a ticket type button')
@@ -359,6 +350,90 @@ async function clearChannel(channel) {
 	return totalDeleted;
 }
 
+// --=-== | Add-ticket-type wizard | ==-=--
+
+const activeWizards = new Set();
+
+async function askInChat(channel, userId, question) {
+	await channel.send(question);
+	const collected = await channel
+		.awaitMessages({ filter: (m) => m.author.id === userId, max: 1, time: 120000 })
+		.catch(() => null);
+	if (!collected || collected.size === 0) return null;
+	const msg = collected.first();
+	if (msg.content.trim().toLowerCase() === 'cancel') return undefined;
+	return msg;
+}
+
+async function runAddTicketWizard(interaction) {
+	const userId = interaction.user.id;
+	const channel = interaction.channel;
+
+	if (activeWizards.has(userId)) {
+		await interaction.reply({
+			content: 'Already running a setup for you \u2014 finish that one or type cancel first.',
+			ephemeral: true,
+		});
+		return;
+	}
+	activeWizards.add(userId);
+	await interaction.reply({ content: 'Setup starting below \u2014 answer in this channel. Type cancel any time to stop.', ephemeral: true });
+
+	try {
+		const idMsg = await askInChat(channel, userId, '**Step 1/5** — short id for this type (lowercase, no spaces — e.g. `ui`, `pm`):');
+		if (idMsg == null) return void (await channel.send(idMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
+		const id = idMsg.content.trim().toLowerCase().replace(/\s+/g, '-');
+
+		const labelMsg = await askInChat(channel, userId, '**Step 2/5** — what should the button say? (e.g. `UI Designer`):');
+		if (labelMsg == null) return void (await channel.send(labelMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
+		const label = labelMsg.content.trim();
+
+		const prefixMsg = await askInChat(channel, userId, '**Step 3/5** — what should ticket channels be named? (e.g. `application`, `ticket`):');
+		if (prefixMsg == null) return void (await channel.send(prefixMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
+		const prefix = prefixMsg.content.trim().toLowerCase().replace(/\s+/g, '-');
+
+		const roleMsg = await askInChat(channel, userId, '**Step 4/5** — mention the role to ping and grant access, or type `skip` for none:');
+		if (roleMsg == null) return void (await channel.send(roleMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
+		const mentionedRole = roleMsg.mentions.roles.first();
+		const roleId = mentionedRole ? mentionedRole.id : null;
+
+		await channel.send("**Step 5/5** — questions to ask applicants, one at a time. Type `done` once you've added at least one (max 5).");
+		const fields = [];
+		while (fields.length < 5) {
+			const fieldMsg = await askInChat(channel, userId, `Field ${fields.length + 1}${fields.length > 0 ? ' (or type `done`)' : ''}:`);
+			if (fieldMsg == null) return void (await channel.send(fieldMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
+			const text = fieldMsg.content.trim();
+			if (text.toLowerCase() === 'done') {
+				if (fields.length === 0) {
+					await channel.send('Need at least one field before `done` works — keep going.');
+					continue;
+				}
+				break;
+			}
+			fields.push(text);
+		}
+
+		const config = loadJson(CONFIG_FILE, {});
+		config[id] = { id, label, prefix, roleId, fields };
+		saveJson(CONFIG_FILE, config);
+
+		const summary = new EmbedBuilder()
+			.setColor(BRAND_COLOR)
+			.setTitle('Ticket type saved')
+			.addFields(
+				{ name: 'ID', value: id, inline: true },
+				{ name: 'Button', value: label, inline: true },
+				{ name: 'Prefix', value: prefix, inline: true },
+				{ name: 'Role', value: roleId ? `<@&${roleId}>` : 'None', inline: true },
+				{ name: 'Fields', value: fields.join(', ') }
+			)
+			.setFooter({ text: 'Run /post-panel to show it on the panel' });
+		await channel.send({ embeds: [summary] });
+	} finally {
+		activeWizards.delete(userId);
+	}
+}
+
 // --=-== | Events | ==-=--
 
 client.once(Events.ClientReady, async () => {
@@ -384,23 +459,7 @@ client.on(Events.MessageCreate, async (message) => {
 client.on(Events.InteractionCreate, async (interaction) => {
 	try {
 		if (interaction.isChatInputCommand() && interaction.commandName === 'add-ticket-type') {
-			const config = loadJson(CONFIG_FILE, {});
-			const id = interaction.options.getString('id');
-			const fields = [1, 2, 3, 4, 5]
-				.map((n) => interaction.options.getString(`field${n}`))
-				.filter(Boolean);
-			config[id] = {
-				id,
-				label: interaction.options.getString('label'),
-				prefix: interaction.options.getString('prefix'),
-				roleId: interaction.options.getRole('role')?.id || null,
-				fields,
-			};
-			saveJson(CONFIG_FILE, config);
-			await interaction.reply({
-				content: `Ticket type "${id}" saved with ${fields.length} field(s). Resets to config.json on the next redeploy on hosts with no persistent disk.`,
-				ephemeral: true,
-			});
+			await runAddTicketWizard(interaction);
 			return;
 		}
 
