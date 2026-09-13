@@ -46,4 +46,4 @@ The bot needs to actually have access to whatever channel gets picked — if it 
 `counter.json`, `config.json`, and `sticky.json` all live next to the script. On a host with no persistent disk (Render's free tier, for one), all three reset to what's shipped in the repo on every redeploy — live changes made through commands don't survive a redeploy unless the host has a volume, or the change also gets committed.
 
 ## Hosting
-A host needs to stay running for this to work continuously. Render's free tier works with a keep-alive ping — see the HTTP server at the bottom of `index.js`, paired with an external uptime monitor hitting it every few minutes.
+A host needs to stay running for this to work continuously. Set `RENDER_URL` to the service's own `.onrender.com` address and the bot pings itself every 4 minutes from the outside in, which is what actually resets Render's idle timer — an external monitor like UptimeRobot did the same job before this existed, and isn't needed anymore once `RENDER_URL` is set. Leaving both running isn't harmful, just redundant.

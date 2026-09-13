@@ -2,6 +2,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const https = require('https');
 const {
 	Client,
 	GatewayIntentBits,
@@ -453,5 +454,19 @@ http
 		res.end('OK');
 	})
 	.listen(process.env.PORT || 3000);
+
+// --=-== | Self-ping (Render) | ==-=--
+
+if (process.env.RENDER_URL) {
+	setInterval(() => {
+		https
+			.get(process.env.RENDER_URL, (res) => {
+				console.log(`Self-ping: ${res.statusCode}`);
+			})
+			.on('error', (err) => {
+				console.log(`Self-ping failed: ${err.message}`);
+			});
+	}, 4 * 60 * 1000);
+}
 
 client.login(DISCORD_TOKEN);
