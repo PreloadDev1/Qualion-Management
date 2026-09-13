@@ -12,6 +12,7 @@ const {
 	ActionRowBuilder,
 	ButtonBuilder,
 	ButtonStyle,
+	StringSelectMenuBuilder,
 	ChannelType,
 	PermissionsBitField,
 	EmbedBuilder,
@@ -30,6 +31,7 @@ const {
 	RULES_CHANNEL_ID,
 	STORAGE_CHANNEL_ID,
 	INVOICES_CATEGORY_ID,
+	PROJECTS_CATEGORY_ID,
 } = process.env;
 
 const BRAND_COLOR = 0x5865f2;
@@ -421,7 +423,7 @@ async function createTicketChannel(interaction, type) {
 	if (type.roleId) {
 		buttons.push(
 			new ButtonBuilder()
-				.setCustomId(`approve:${interaction.user.id}:${type.roleId}`)
+				.setCustomId(`approve:${interaction.user.id}`)
 				.setLabel('Approve')
 				.setStyle(ButtonStyle.Success)
 		);
@@ -470,6 +472,8 @@ async function clearChannel(channel) {
 // --=-== | Add-ticket-type wizard | ==-=--
 
 const activeWizards = new Set();
+const invoiceCooldowns = new Map();
+const INVOICE_COOLDOWN_MS = 5 * 60 * 1000;
 
 async function askInChat(channel, userId, question) {
 	await channel.send(question);
@@ -742,8 +746,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
 		}
 
 		if (interaction.isButton() && interaction.customId === 'open_invoice') {
+			const lastUsed = invoiceCooldowns.get(interaction.user.id);
+			const now = Date.now();
+			if (lastUsed && now - lastUsed < INVOICE_COOLDOWN_MS) {
+				const readyAt = Math.floor((lastUsed + INVOICE_COOLDOWN_MS) / 1000);
+				await interaction.reply({
+					content: `You can create another payment ticket <t:${readyAt}:R>.`,
+					ephemeral: true,
+				});
+				return;
+			}
 			await interaction.reply({ content: 'Invoice channel created, check below.', ephemeral: true });
 			await createInvoiceChannel(interaction);
+			invoiceCooldowns.set(interaction.user.id, now);
 			return;
 		}
 
@@ -765,6 +780,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 				await interaction.reply({ content: 'That ticket type no longer exists.', ephemeral: true });
 				return;
 			}
+			if (type.roleId && !interaction.member.roles.cache.has(type.roleId)) {
+				await interaction.reply({
+					content: `You need the <@&${type.roleId}> role before opening this.`,
+					ephemeral: true,
+				});
+				return;
+			}
 			await interaction.reply({ content: 'Ticket created, check the new channel.', ephemeral: true });
 			await createTicketChannel(interaction, type);
 			return;
@@ -776,14 +798,54 @@ client.on(Events.InteractionCreate, async (interaction) => {
 				await interaction.reply({ content: 'Only Leads can approve this.', ephemeral: true });
 				return;
 			}
-			const [, applicantId, roleId] = interaction.customId.split(':');
-			const member = await interaction.guild.members.fetch(applicantId).catch(() => null);
-			if (!member) {
-				await interaction.reply({ content: "Couldn't find that member anymore.", ephemeral: true });
+			const [, applicantId] = interaction.customId.split(':');
+
+			await interaction.guild.channels.fetch();
+			const projectChannels = interaction.guild.channels.cache.filter(
+				(c) => c.parentId === PROJECTS_CATEGORY_ID && c.type === ChannelType.GuildText
+			);
+
+			if (projectChannels.size === 0) {
+				await interaction.reply({ content: 'No channels found under the Projects category.', ephemeral: true });
 				return;
 			}
-			await member.roles.add(roleId).catch(() => {});
-			await interaction.reply(`<@${applicantId}> approved — <@&${roleId}> role added.`);
+
+			const menu = new StringSelectMenuBuilder()
+				.setCustomId(`approve_channel:${applicantId}`)
+				.setPlaceholder('Which project should they join?')
+				.addOptions(
+					projectChannels.first(25).map((c) => ({ label: c.name.replace(/^┃/, ''), value: c.id }))
+				);
+
+			await interaction.reply({
+				content: 'Pick the project to add them to:',
+				components: [new ActionRowBuilder().addComponents(menu)],
+				ephemeral: true,
+			});
+			return;
+		}
+
+		if (interaction.isStringSelectMenu() && interaction.customId.startsWith('approve_channel:')) {
+			const applicantId = interaction.customId.split(':')[1];
+			const targetChannel = await interaction.guild.channels.fetch(interaction.values[0]).catch(() => null);
+			if (!targetChannel) {
+				await interaction.update({ content: "That channel doesn't exist anymore.", components: [] });
+				return;
+			}
+
+			await targetChannel.permissionOverwrites.edit(applicantId, {
+				ViewChannel: true,
+				SendMessages: true,
+				ReadMessageHistory: true,
+			});
+			await targetChannel.send(`<@${applicantId}> has been added to this project.`);
+
+			await interaction.update({
+				content: `<@${applicantId}> added to ${targetChannel}. Closing this ticket in 5 seconds.`,
+				components: [],
+			});
+
+			setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
 			return;
 		}
 

@@ -10,7 +10,7 @@ OAuth2 → URL Generator → check `bot` and `applications.commands`. Bot permis
 Developer Mode on (User Settings → Advanced). Right-click the server for `GUILD_ID`, the Tickets category for `TICKETS_CATEGORY_ID`, the Leads role for `LEADS_ROLE_ID`, a dedicated Invoices category for `INVOICES_CATEGORY_ID`, and a private channel only the bot needs to see for `STORAGE_CHANNEL_ID`.
 
 ## Environment
-`DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, `TICKETS_CATEGORY_ID`, `LEADS_ROLE_ID`, `MEMBER_ROLE_ID`, `RULES_CHANNEL_ID`, `STORAGE_CHANNEL_ID`, `INVOICES_CATEGORY_ID` — same as `.env.example`. `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` too, if invoice tracking is wanted; leave both unset and that part just stays off. `RENDER_URL` if hosting on Render.
+`DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, `TICKETS_CATEGORY_ID`, `LEADS_ROLE_ID`, `MEMBER_ROLE_ID`, `RULES_CHANNEL_ID`, `STORAGE_CHANNEL_ID`, `INVOICES_CATEGORY_ID`, `PROJECTS_CATEGORY_ID` — same as `.env.example`. `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` too, if invoice tracking is wanted; leave both unset and that part just stays off. `RENDER_URL` if hosting on Render.
 
 ## Run
 ```
@@ -35,7 +35,9 @@ Buttons live in `config.json`, not code. Clicking one creates the ticket channel
 `/add-ticket-type`'s wizard needs Message Content Intent on in the Developer Portal (Bot → Privileged Gateway Intents) to read chat answers — `/create-applications-panel` doesn't, since it reads role data instead.
 
 ## Ticket channels
-Each open application ticket gets a Close button, and an Approve button too if the type has a role attached. Approve grants that role to whoever opened the ticket and posts a confirmation — it doesn't close the channel, that's separate. Close is Leads-only and deletes the channel after five seconds.
+Opening a ticket now requires already holding the role tied to that type — clicking a button for a discipline someone isn't in gets a plain explanation instead of a channel. This flips the role's meaning: it's no longer something Approve grants, it's the prerequisite for applying in the first place.
+
+Each open ticket still gets a Close button, and an Approve button too if the type has a role attached. Approve no longer grants anything — it prompts for which channel under `PROJECTS_CATEGORY_ID` to add the applicant to (a dropdown built from the actual channels in that category, up to 25), grants them View and Send there on selection, and closes the ticket automatically five seconds later. Close by itself still works exactly as before, Leads-only, five-second delay.
 
 Channels are named `┃<prefix>-001` and so on, numbered per prefix — every `application` ticket shares one counter regardless of discipline. Drop the `┃` from `createTicketChannel` in the code if it doesn't render the way you want.
 
@@ -43,7 +45,7 @@ Channels are named `┃<prefix>-001` and so on, numbered per prefix — every `a
 `/add-employee user:<pick> channel:<pick a project channel>` grants that user View and Send access to the picked channel and posts a short note in it. Meant for onboarding someone from a ticket straight onto the project channel they'll actually work in — the channel itself still needs to exist first (create it under a Projects category same as any other channel).
 
 ## Invoices
-`/create-invoice-panel` posts a fixed panel — one button, no configuration — styled green rather than the blurple applications use, so it reads as its own distinct thing at a glance. Clicking it creates a channel named `┃<username>-001`, numbered per person rather than shared: the count comes from how many invoice channels that exact user already has in `INVOICES_CATEGORY_ID`, so their fourth one becomes `-004` automatically. No Close button, and nothing in the code deletes these — they're meant to stay as a permanent record.
+`/create-invoice-panel` posts a fixed panel — one button, no configuration — styled green rather than the blurple applications use, so it reads as its own distinct thing at a glance. The button has a 5-minute cooldown per person — clicking again too soon replies with when it'll be ready instead of creating another channel; this resets if the bot restarts, which is fine, nothing depends on it surviving that. Clicking it (once past cooldown) creates a channel named `┃<username>-001`, numbered per person rather than shared: the count comes from how many invoice channels that exact user already has in `INVOICES_CATEGORY_ID`, so their fourth one becomes `-004` automatically. No Close button, and nothing in the code deletes these — they're meant to stay as a permanent record.
 
 On creation the invoice template posts and pins immediately — the real file at the repo root, with an embed pointing at which sections need filling in (Payee, Work, Payment, Project). This is back to how it worked before the commission-terms message got added and then pulled back out — that message (and the emoji resolver built for it) is still in the code, just not called from anywhere right now, in case it's wanted somewhere later rather than rebuilt from scratch.
 
