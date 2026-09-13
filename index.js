@@ -32,7 +32,7 @@ const {
 } = process.env;
 
 const BRAND_COLOR = 0x5865f2;
-const VERIFY_COLOR = 0x57f287;
+const GREEN_COLOR = 0x57f287;
 
 // --=-== | Storage (ticket types, ticket counter) | ==-=--
 
@@ -144,29 +144,23 @@ const client = new Client({
 const commands = [
 	new SlashCommandBuilder()
 		.setName('add-ticket-type')
-		.setDescription('Set up a new ticket type by answering questions in chat')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+		.setDescription('Set up a new ticket type by answering questions in chat'),
 	new SlashCommandBuilder()
 		.setName('remove-ticket-type')
 		.setDescription('Remove a ticket type button')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
 		.addStringOption((o) => o.setName('id').setDescription('Short id to remove').setRequired(true)),
 	new SlashCommandBuilder()
 		.setName('list-ticket-types')
-		.setDescription('List configured ticket types')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+		.setDescription('List configured ticket types'),
 	new SlashCommandBuilder()
 		.setName('post-panel')
-		.setDescription('Post the ticket panel in this channel')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+		.setDescription('Post the ticket panel in this channel'),
 	new SlashCommandBuilder()
 		.setName('post-verify')
-		.setDescription('Post the verification embed in this channel')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+		.setDescription('Post the verification embed in this channel'),
 	new SlashCommandBuilder()
 		.setName('clear-channel')
 		.setDescription('Delete every message in a channel \u2014 irreversible')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
 		.addChannelOption((o) =>
 			o.setName('channel').setDescription('Which channel to wipe').setRequired(true).addChannelTypes(ChannelType.GuildText)
 		)
@@ -175,27 +169,23 @@ const commands = [
 		),
 	new SlashCommandBuilder()
 		.setName('create-applications-panel')
-		.setDescription('Build a ticket type for every #607d8b role and post the panel here')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+		.setDescription('Build a ticket type for every #607d8b role and post the panel here'),
 	new SlashCommandBuilder()
 		.setName('clear-ticket-types')
 		.setDescription('Remove every configured ticket type at once')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
 		.addStringOption((o) =>
 			o.setName('confirm').setDescription('Type CONFIRM exactly to actually do this').setRequired(true)
 		),
 	new SlashCommandBuilder()
 		.setName('add-employee')
 		.setDescription('Give a user access to a project channel')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild)
 		.addUserOption((o) => o.setName('user').setDescription('Who to add').setRequired(true))
 		.addChannelOption((o) =>
 			o.setName('channel').setDescription('Which project channel').setRequired(true).addChannelTypes(ChannelType.GuildText)
 		),
 	new SlashCommandBuilder()
 		.setName('create-invoice-panel')
-		.setDescription('Post the payment ticket panel in this channel')
-		.setDefaultMemberPermissions(PermissionsBitField.Flags.ManageGuild),
+		.setDescription('Post the payment ticket panel in this channel'),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -234,7 +224,7 @@ function buildPanel(config) {
 
 function buildVerifyPanel() {
 	const embed = new EmbedBuilder()
-		.setColor(VERIFY_COLOR)
+		.setColor(GREEN_COLOR)
 		.setTitle('Verify to enter')
 		.setDescription(
 			`Read <#${RULES_CHANNEL_ID}> first.\n\nOnce you're good with it, click **Verify** below to unlock the rest of the server.`
@@ -252,13 +242,13 @@ function buildVerifyPanel() {
 
 function buildInvoicePanel() {
 	const embed = new EmbedBuilder()
-		.setColor(BRAND_COLOR)
-		.setTitle('Request a payment')
+		.setColor(GREEN_COLOR)
+		.setTitle('💵 Request a payment')
 		.setDescription('Create a ticket for payment. A private channel opens with your name on it, kept on record — it never gets closed or deleted.')
 		.setFooter({ text: 'Qualion Management' });
 
 	const row = new ActionRowBuilder().addComponents(
-		new ButtonBuilder().setCustomId('open_invoice').setLabel('Create Invoice').setStyle(ButtonStyle.Primary)
+		new ButtonBuilder().setCustomId('open_invoice').setLabel('Create Payment Ticket').setStyle(ButtonStyle.Success)
 	);
 
 	return { embeds: [embed], components: [row] };
@@ -291,20 +281,30 @@ async function createInvoiceChannel(interaction) {
 		],
 	});
 
-	await channel.send({
-		content: `<@&${LEADS_ROLE_ID}> <@${interaction.user.id}>`,
-		embeds: [
-			new EmbedBuilder()
-				.setColor(BRAND_COLOR)
-				.setTitle('Invoice template attached')
-				.setDescription(
-					"We're not able to fill this in on your behalf for legal reasons — please complete it yourself.\n\n" +
-						'Fill in your details under **Payee**, list what was delivered under **Work** with quantity and rate, fill in **Payment** with how you want to be paid, and note the project under **Project**. Post the completed file back in this channel once it\'s ready — a Lead will review and process it from here.'
-				)
-				.setFooter({ text: 'Qualion Management' }),
-		],
-		files: [path.join(__dirname, 'assets', 'InvoiceTemplate.docx')],
-	});
+	const invoiceEmbed = new EmbedBuilder()
+		.setColor(BRAND_COLOR)
+		.setTitle('Invoice template attached')
+		.setDescription(
+			"We're not able to fill this in on your behalf for legal reasons — please complete it yourself.\n\n" +
+				'Fill in your details under **Payee**, list what was delivered under **Work** with quantity and rate, fill in **Payment** with how you want to be paid, and note the project under **Project**. Post the completed file back in this channel once it\'s ready — a Lead will review and process it from here.'
+		)
+		.setFooter({ text: 'Qualion Management' });
+
+	const templatePath = path.join(__dirname, 'assets', 'InvoiceTemplate.docx');
+
+	try {
+		await channel.send({
+			content: `<@&${LEADS_ROLE_ID}> <@${interaction.user.id}>`,
+			embeds: [invoiceEmbed],
+			files: [templatePath],
+		});
+	} catch (err) {
+		console.log(`Invoice template attachment failed (${templatePath}): ${err.message}`);
+		await channel.send({
+			content: `<@&${LEADS_ROLE_ID}> <@${interaction.user.id}>\n\n⚠️ The template file couldn't be attached — check with a Lead.`,
+			embeds: [invoiceEmbed],
+		});
+	}
 
 	await recordInvoice(channel, name, interaction.user);
 
@@ -483,6 +483,11 @@ client.once(Events.ClientReady, async () => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
 	try {
+		if (interaction.isChatInputCommand() && !interaction.member.roles.cache.has(LEADS_ROLE_ID)) {
+			await interaction.reply({ content: 'Only Leads can use bot commands.', ephemeral: true });
+			return;
+		}
+
 		if (interaction.isChatInputCommand() && interaction.commandName === 'add-ticket-type') {
 			await runAddTicketWizard(interaction);
 			return;
