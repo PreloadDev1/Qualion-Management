@@ -397,12 +397,6 @@ async function createTicketChannel(interaction, type) {
 			],
 		},
 	];
-	if (type.roleId) {
-		overwrites.push({
-			id: type.roleId,
-			allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
-		});
-	}
 
 	const channel = await guild.channels.create({
 		name,
