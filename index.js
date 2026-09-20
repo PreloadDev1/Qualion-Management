@@ -834,11 +834,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 			await targetChannel.send(`<@${applicantId}> has been added to this project.`);
 
 			await interaction.update({
-				content: `<@${applicantId}> added to ${targetChannel}. Closing this ticket in 5 seconds.`,
+				content: `<@${applicantId}> added to ${targetChannel}.`,
 				components: [],
 			});
-
-			setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
 			return;
 		}
 
