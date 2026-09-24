@@ -351,7 +351,7 @@ async function createInvoiceChannel(interaction) {
 		.setTitle('Invoice template attached')
 		.setDescription(
 			"We're not able to fill this in on your behalf for legal reasons — please complete it yourself.\n\n" +
-				'Fill in your details under **Payee**, list what was delivered under **Work** with quantity and rate, fill in **Payment** with how you want to be paid, and note the project under **Project**. Post the completed file back in this channel once it\'s ready — a Lead will review and process it from here.'
+				'Fill in your **legal name and legal address** along with the rest of your details under **Payee**, list what was delivered under **Work** with quantity and rate, fill in **Payment** with how you want to be paid, and note the project under **Project**. Once it\'s filled in, export it as a **PDF** and post that back in this channel — a Lead will review and process it from here.'
 		)
 		.setFooter({ text: 'Qualion Management' });
 
