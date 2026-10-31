@@ -826,6 +826,43 @@ setInterval(() => {
 	}
 }, WATCHDOG_INTERVAL_MS);
 
+// --=-== | Login diagnostics | ==-=--
+
+let debugLines = 0;
+client.on(Events.Debug, (message) => {
+	if (client.isReady() || debugLines >= 40) return;
+	debugLines += 1;
+	log('Discord debug:', message.replace(Env.DiscordToken || '', '[token]'));
+});
+
+client.rest.on('rateLimited', (info) => {
+	log(`Discord rate limit: ${info.method} ${info.route} — retry in ${Math.round(info.timeToReset / 1000)}s (global: ${info.global})`);
+});
+
+async function diagnoseLogin() {
+	if (client.isReady()) return;
+	try {
+		const response = await fetch('https://discord.com/api/v10/gateway/bot', {
+			headers: { Authorization: `Bot ${Env.DiscordToken}` },
+			signal: AbortSignal.timeout(15000),
+		});
+		const body = (await response.text()).replace(/\s+/g, ' ').slice(0, 200);
+		log(
+			`Login check: HTTP ${response.status}, retry-after=${response.headers.get('retry-after')}, ` +
+				`global=${response.headers.get('x-ratelimit-global')}, scope=${response.headers.get('x-ratelimit-scope')}, ` +
+				`cf-ray=${response.headers.get('cf-ray')}, body=${body}`
+		);
+		if (response.status === 401) logError('Login check', 'DISCORD_TOKEN is invalid — reset it and update Render');
+		if (response.status === 429 || /1015|cloudflare/i.test(body)) {
+			logError('Login check', "Discord is blocking this host's IP (rate limit / Cloudflare ban) — not a code problem");
+		}
+	} catch (err) {
+		logError('Login check: could not reach Discord at all', err);
+	}
+}
+
+setTimeout(diagnoseLogin, 45 * 1000);
+
 // --=-== | Login | ==-=--
 
 if (missingEnv.length === 0) {
