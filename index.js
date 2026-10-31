@@ -772,11 +772,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // --=-== | Health server | ==-=--
 
+let ipBlockedUntil = 0;
+
 function healthReport() {
 	const ready = client.isReady() && client.ws.status === Status.Ready;
+	const blocked = !ready && ipBlockedUntil > Date.now();
 	return {
-		ok: ready,
-		discord: ready ? 'ready' : `not ready (status ${client.ws.status})`,
+		ok: ready || blocked,
+		discord: ready ? 'ready' : blocked ? `IP blocked by Discord until ${new Date(ipBlockedUntil).toISOString()}` : `not ready (status ${client.ws.status})`,
 		ping: client.ws.ping,
 		uptimeMinutes: Math.floor((Date.now() - BOOTED_AT) / 60000),
 	};
@@ -813,7 +816,7 @@ if (Env.PublicUrl) {
 
 let unhealthySince = null;
 setInterval(() => {
-	if (healthReport().ok) {
+	if (healthReport().ok || ipBlockedUntil > Date.now()) {
 		unhealthySince = null;
 		return;
 	}
@@ -854,7 +857,13 @@ async function diagnoseLogin() {
 		);
 		if (response.status === 401) logError('Login check', 'DISCORD_TOKEN is invalid — reset it and update Render');
 		if (response.status === 429 || /1015|cloudflare/i.test(body)) {
-			logError('Login check', "Discord is blocking this host's IP (rate limit / Cloudflare ban) — not a code problem");
+			const waitSeconds = Number(response.headers.get('retry-after')) || 3600;
+			ipBlockedUntil = Date.now() + waitSeconds * 1000 + 5 * 60 * 1000;
+			logError(
+				'Login check',
+				`Discord is blocking this host's IP for ${Math.round(waitSeconds / 60)} min — not a code problem. ` +
+					'Waiting it out instead of restarting; moving the Render service to another region avoids the wait.'
+			);
 		}
 	} catch (err) {
 		logError('Login check: could not reach Discord at all', err);
@@ -862,6 +871,9 @@ async function diagnoseLogin() {
 }
 
 setTimeout(diagnoseLogin, 45 * 1000);
+setInterval(() => {
+	if (!client.isReady() && ipBlockedUntil <= Date.now()) diagnoseLogin();
+}, 10 * 60 * 1000);
 
 // --=-== | Login | ==-=--
 
