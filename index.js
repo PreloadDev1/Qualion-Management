@@ -1,14 +1,15 @@
 require('dotenv').config();
-const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
-const { createClient } = require('@libsql/client');
 const emoji = require('node-emoji');
+const { createClient } = require('@libsql/client');
 const {
 	Client,
 	GatewayIntentBits,
 	Events,
+	Status,
+	MessageFlags,
 	ActionRowBuilder,
 	ButtonBuilder,
 	ButtonStyle,
@@ -21,257 +22,129 @@ const {
 	SlashCommandBuilder,
 } = require('discord.js');
 
-const {
-	DISCORD_TOKEN,
-	CLIENT_ID,
-	GUILD_ID,
-	TICKETS_CATEGORY_ID,
-	LEADS_ROLE_ID,
-	MEMBER_ROLE_ID,
-	RULES_CHANNEL_ID,
-	STORAGE_CHANNEL_ID,
-	INVOICES_CATEGORY_ID,
-	PROJECTS_CATEGORY_ID,
-} = process.env;
+// --=-== | Config | ==-=--
 
+const Env = {
+	DiscordToken: process.env.DISCORD_TOKEN,
+	ClientId: process.env.CLIENT_ID,
+	GuildId: process.env.GUILD_ID,
+	LeadsRoleId: process.env.LEADS_ROLE_ID,
+	MemberRoleId: process.env.MEMBER_ROLE_ID,
+	RulesChannelId: process.env.RULES_CHANNEL_ID,
+	TicketsCategoryId: process.env.TICKETS_CATEGORY_ID,
+	ProjectsCategoryId: process.env.PROJECTS_CATEGORY_ID,
+	InvoicesCategoryId: process.env.INVOICES_CATEGORY_ID,
+	StorageChannelId: process.env.STORAGE_CHANNEL_ID,
+	TursoUrl: process.env.TURSO_DATABASE_URL,
+	TursoToken: process.env.TURSO_AUTH_TOKEN,
+	PublicUrl: process.env.RENDER_URL || process.env.RENDER_EXTERNAL_URL,
+	Port: Number(process.env.PORT) || 3000,
+};
+
+const REQUIRED_ENV = ['DiscordToken', 'ClientId', 'GuildId', 'LeadsRoleId'];
+const APPLICATION_ROLE_COLOR = '#607d8b';
 const BRAND_COLOR = 0x5865f2;
 const GREEN_COLOR = 0x57f287;
+const RED_COLOR = 0xed4245;
+const FOOTER = { text: 'Qualion Management' };
+const INVOICE_COOLDOWN_MS = 5 * 60 * 1000;
+const WATCHDOG_INTERVAL_MS = 30 * 1000;
+const WATCHDOG_LIMIT_MS = 5 * 60 * 1000;
+const SELF_PING_INTERVAL_MS = 4 * 60 * 1000;
+const TEMPLATE_PATH = path.join(__dirname, 'InvoiceTemplate.docx');
+const BOOTED_AT = Date.now();
 
-// --=-== | Storage (ticket types, ticket counter) | ==-=--
+// --=-== | Logging | ==-=--
 
-const CONFIG_FILE = path.join(__dirname, 'config.json');
-const COUNTER_FILE = process.env.COUNTER_PATH || path.join(__dirname, 'counter.json');
-
-function loadJson(file, fallback) {
-	if (!fs.existsSync(file)) return fallback;
-	return JSON.parse(fs.readFileSync(file, 'utf8'));
+function log(...args) {
+	console.log(`[${new Date().toISOString()}]`, ...args);
 }
 
-function saveJson(file, data) {
-	fs.writeFileSync(file, JSON.stringify(data, null, 2));
+function logError(context, err) {
+	console.error(`[${new Date().toISOString()}] ${context}:`, err?.stack || err?.message || err);
 }
 
-let counterStoreMessageId = null;
-
-async function loadCounterFromDiscord() {
-	if (!STORAGE_CHANNEL_ID) return;
-	try {
-		const channel = await client.channels.fetch(STORAGE_CHANNEL_ID);
-		const pins = await channel.messages.fetchPinned();
-		const stored = pins.find((m) => m.author.id === client.user.id && m.content.includes('COUNTER'));
-		if (stored) {
-			counterStoreMessageId = stored.id;
-			const raw = stored.content.replace(/^COUNTER```json\n|\n```$/g, '');
-			saveJson(COUNTER_FILE, JSON.parse(raw));
-			console.log('Ticket counter restored from storage channel.');
-		}
-	} catch (err) {
-		console.log(`Counter restore failed: ${err.message}`);
-	}
+const missingEnv = REQUIRED_ENV.filter((key) => !Env[key]);
+if (missingEnv.length > 0) {
+	logError('Startup', `Missing required environment variables: ${missingEnv.join(', ')}`);
+	setTimeout(() => process.exit(1), 30 * 1000);
 }
 
-async function persistCounter(counters) {
-	saveJson(COUNTER_FILE, counters);
-	if (!STORAGE_CHANNEL_ID) return;
-	try {
-		const channel = await client.channels.fetch(STORAGE_CHANNEL_ID);
-		const content = 'COUNTER```json\n' + JSON.stringify(counters) + '\n```';
-		if (counterStoreMessageId) {
-			const msg = await channel.messages.fetch(counterStoreMessageId).catch(() => null);
-			if (msg) {
-				await msg.edit(content);
-				return;
-			}
-		}
-		const sent = await channel.send(content);
-		await sent.pin().catch(() => {});
-		counterStoreMessageId = sent.id;
-	} catch (err) {
-		console.log(`Counter persist failed: ${err.message}`);
-	}
-}
+// --=-== | Process safety | ==-=--
 
-async function nextNumber(prefix) {
-	const counters = loadJson(COUNTER_FILE, {});
-	const next = (counters[prefix] || 0) + 1;
-	counters[prefix] = next;
-	await persistCounter(counters);
-	return String(next).padStart(3, '0');
-}
+process.on('unhandledRejection', (err) => logError('Unhandled rejection', err));
 
-// --=-== | Invoice database (Turso) | ==-=--
+process.on('uncaughtException', (err) => {
+	logError('Uncaught exception — restarting', err);
+	setTimeout(() => process.exit(1), 1000);
+});
 
-const turso = process.env.TURSO_DATABASE_URL
-	? createClient({ url: process.env.TURSO_DATABASE_URL, authToken: process.env.TURSO_AUTH_TOKEN })
-	: null;
-
-async function ensureInvoiceTable() {
-	if (!turso) return;
-	try {
-		await turso.execute(`
-			CREATE TABLE IF NOT EXISTS invoices (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				discord_user_id TEXT NOT NULL,
-				discord_username TEXT NOT NULL,
-				channel_id TEXT NOT NULL,
-				channel_name TEXT NOT NULL,
-				status TEXT NOT NULL DEFAULT 'pending',
-				created_at TEXT NOT NULL DEFAULT (datetime('now'))
-			)
-		`);
-		// Older tables won't have these yet — add them, ignore the error if they're already there.
-		await turso.execute('ALTER TABLE invoices ADD COLUMN approved_invoice_url TEXT').catch(() => {});
-		await turso.execute('ALTER TABLE invoices ADD COLUMN approved_at TEXT').catch(() => {});
-	} catch (err) {
-		console.log(`Invoice table setup failed: ${err.message}`);
-	}
-}
-
-async function recordInvoice(channel, name, user) {
-	if (!turso) return;
-	try {
-		await turso.execute({
-			sql: 'INSERT INTO invoices (discord_user_id, discord_username, channel_id, channel_name) VALUES (?, ?, ?, ?)',
-			args: [user.id, user.username, channel.id, name],
-		});
-	} catch (err) {
-		console.log(`Invoice record failed: ${err.message}`);
-	}
+for (const signal of ['SIGTERM', 'SIGINT']) {
+	process.on(signal, () => {
+		log(`${signal} received, shutting down`);
+		client.destroy().finally(() => process.exit(0));
+		setTimeout(() => process.exit(0), 5000);
+	});
 }
 
 // --=-== | Client | ==-=--
 
-const client = new Client({
-	intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+client.on(Events.Error, (err) => logError('Client error', err));
+client.on(Events.Warn, (msg) => log('Client warning:', msg));
+client.on(Events.ShardDisconnect, (event, id) => log(`Shard ${id} disconnected (code ${event?.code})`));
+client.on(Events.ShardReconnecting, (id) => log(`Shard ${id} reconnecting`));
+client.on(Events.ShardResume, (id, replayed) => log(`Shard ${id} resumed (${replayed} events replayed)`));
+client.on(Events.ShardError, (err, id) => logError(`Shard ${id} error`, err));
+client.on(Events.Invalidated, () => {
+	logError('Session', 'Discord invalidated the session — restarting');
+	process.exit(1);
 });
 
-// --=-== | Slash commands | ==-=--
+// --=-== | Helpers | ==-=--
 
-const commands = [
-	new SlashCommandBuilder()
-		.setName('add-ticket-type')
-		.setDescription('Set up a new ticket type by answering questions in chat'),
-	new SlashCommandBuilder()
-		.setName('remove-ticket-type')
-		.setDescription('Remove a ticket type button')
-		.addStringOption((o) => o.setName('id').setDescription('Short id to remove').setRequired(true)),
-	new SlashCommandBuilder()
-		.setName('list-ticket-types')
-		.setDescription('List configured ticket types'),
-	new SlashCommandBuilder()
-		.setName('post-panel')
-		.setDescription('Post the ticket panel in this channel'),
-	new SlashCommandBuilder()
-		.setName('post-verify')
-		.setDescription('Post the verification embed in this channel'),
-	new SlashCommandBuilder()
-		.setName('clear-channel')
-		.setDescription('Delete every message in a channel \u2014 irreversible')
-		.addChannelOption((o) =>
-			o.setName('channel').setDescription('Which channel to wipe').setRequired(true).addChannelTypes(ChannelType.GuildText)
-		)
-		.addStringOption((o) =>
-			o.setName('confirm').setDescription('Type CONFIRM exactly to actually do this').setRequired(true)
-		),
-	new SlashCommandBuilder()
-		.setName('create-applications-panel')
-		.setDescription('Build a ticket type for every #607d8b role and post the panel here'),
-	new SlashCommandBuilder()
-		.setName('clear-ticket-types')
-		.setDescription('Remove every configured ticket type at once')
-		.addStringOption((o) =>
-			o.setName('confirm').setDescription('Type CONFIRM exactly to actually do this').setRequired(true)
-		),
-	new SlashCommandBuilder()
-		.setName('add-employee')
-		.setDescription('Give a user access to a project channel')
-		.addUserOption((o) => o.setName('user').setDescription('Who to add').setRequired(true))
-		.addChannelOption((o) =>
-			o.setName('channel').setDescription('Which project channel').setRequired(true).addChannelTypes(ChannelType.GuildText)
-		),
-	new SlashCommandBuilder()
-		.setName('create-invoice-panel')
-		.setDescription('Post the payment ticket panel in this channel'),
-	new SlashCommandBuilder()
-		.setName('approve-invoice')
-		.setDescription('Record this invoice channel as approved with the completed file')
-		.addAttachmentOption((o) => o.setName('invoice').setDescription('The completed invoice file').setRequired(true)),
-	new SlashCommandBuilder()
-		.setName('send-message')
-		.setDescription('Post a message as the bot in any channel')
-		.addChannelOption((o) =>
-			o.setName('channel').setDescription('Which channel').setRequired(true).addChannelTypes(ChannelType.GuildText)
-		)
-		.addStringOption((o) => o.setName('message').setDescription('What to send').setRequired(true)),
-].map((c) => c.toJSON());
-
-async function registerCommands() {
-	const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-	await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+function hasRole(member, roleId) {
+	if (!member || !roleId) return false;
+	if (Array.isArray(member.roles)) return member.roles.includes(roleId);
+	return member.roles?.cache?.has(roleId) ?? false;
 }
 
-// --=-== | Panel | ==-=--
+function isLead(interaction) {
+	return hasRole(interaction.member, Env.LeadsRoleId);
+}
 
-function buildPanel(config) {
-	const types = Object.values(config);
-	if (types.length === 0) return null;
+function slugify(text) {
+	return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'user';
+}
 
-	const rows = [];
-	for (let i = 0; i < types.length; i += 5) {
-		const chunk = types.slice(i, i + 5);
-		rows.push(
-			new ActionRowBuilder().addComponents(
-				chunk.map((t) =>
-					new ButtonBuilder().setCustomId(`open:${t.id}`).setLabel(t.label).setStyle(ButtonStyle.Primary)
-				)
-			)
-		);
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function notice(text, color = BRAND_COLOR) {
+	return new EmbedBuilder().setColor(color).setDescription(text);
+}
+
+async function respond(interaction, content, extra = {}) {
+	const payload = { content, embeds: [], components: [], ...extra };
+	try {
+		if (interaction.deferred || interaction.replied) return await interaction.editReply(payload);
+		return await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
+	} catch (err) {
+		logError('Respond failed', err);
 	}
-
-	const embed = new EmbedBuilder()
-		.setColor(BRAND_COLOR)
-		.setTitle('Open a ticket')
-		.setDescription('Pick the button that matches what you need. A private channel opens with a short form.')
-		.setFooter({ text: 'Qualion Management' });
-
-	return { embeds: [embed], components: rows };
 }
 
-// --=-== | Verification | ==-=--
-
-function buildVerifyPanel() {
-	const embed = new EmbedBuilder()
-		.setColor(GREEN_COLOR)
-		.setTitle('Verify to enter')
-		.setDescription(
-			`Read <#${RULES_CHANNEL_ID}> first.\n\nOnce you're good with it, click **Verify** below to unlock the rest of the server.`
-		)
-		.setFooter({ text: 'Qualion Management' });
-
-	const row = new ActionRowBuilder().addComponents(
-		new ButtonBuilder().setCustomId('verify_member').setLabel('VERIFY').setStyle(ButtonStyle.Success)
-	);
-
-	return { embeds: [embed], components: [row] };
+async function fetchChannel(id) {
+	if (!id) return null;
+	return client.channels.fetch(id).catch(() => null);
 }
 
-// --=-== | Invoices | ==-=--
-
-function buildInvoicePanel() {
-	const embed = new EmbedBuilder()
-		.setColor(GREEN_COLOR)
-		.setTitle('💵 Request a payment')
-		.setDescription('Create a ticket for payment. A private channel opens with your name on it, kept on record — it never gets closed or deleted.')
-		.setFooter({ text: 'Qualion Management' });
-
-	const row = new ActionRowBuilder().addComponents(
-		new ButtonBuilder().setCustomId('open_invoice').setLabel('Create Payment Ticket').setStyle(ButtonStyle.Success)
-	);
-
-	return { embeds: [embed], components: [row] };
+function requireEnv(keys) {
+	const missing = keys.filter((key) => !Env[key]);
+	return missing.length > 0 ? `This feature isn't configured yet — missing ${missing.join(', ')} on the host.` : null;
 }
-
-// --=-== | Emoji resolution | ==-=--
 
 function resolveEmojis(guild, text) {
 	const withCustom = text.replace(/:([a-zA-Z0-9_]+)(~\d+)?:/g, (match, name) => {
@@ -281,604 +154,684 @@ function resolveEmojis(guild, text) {
 	return emoji.emojify(withCustom);
 }
 
-const COMMISSION_TERMS = `# :clipboard: Commission terms & server rules :ballot_box_with_check:
--# Taking a job here means you accept these. Nothing below is negotiable except where it says so.
+// --=-== | Persistent counter (stored in Discord) | ==-=--
 
-### :cash: 1. No upfront by default
-I don't pay upfront. If we've worked together before and it went well, we can talk about an upfront of up to 30%. First-time work is paid on delivery.
+const Counter = {
+	values: {},
+	messageId: null,
+	queue: Promise.resolve(),
+};
 
-### :hourglass_flowing_sand: 2. Deadlines
-A missed deadline on your side becomes a missed deadline on mine, and that lands on me. If something comes up and the date is at risk, tell me before it passes.
-> Telling me in advance is never a problem. Staying quiet until the day itself is.
+async function loadCounter() {
+	const channel = await fetchChannel(Env.StorageChannelId);
+	if (!channel) return log('Counter: no storage channel, numbering falls back to existing channels');
+	try {
+		const messages = await channel.messages.fetch({ limit: 50 });
+		const stored = messages.find((m) => m.author.id === client.user.id && m.content.startsWith('COUNTER'));
+		if (!stored) return log('Counter: no saved state yet');
+		const match = stored.content.match(/```json\n([\s\S]*?)\n```/);
+		Counter.values = match ? JSON.parse(match[1]) : {};
+		Counter.messageId = stored.id;
+		log('Counter restored:', JSON.stringify(Counter.values));
+	} catch (err) {
+		logError('Counter load failed', err);
+	}
+}
 
-### :receipt: 3. Invoices are required
-I'm registered as a company, so every payment needs a receipt. **No invoice, no payment.** That's bookkeeping I can't skip.
-If you've never written one, use the template pinned below this message. Fill in:
-- Receiver information (your name or company, address, tax ID if you have one)
-- Payment type (PayPal, bank transfer, crypto, etc.)
-- Amount and currency
-- Date and a short description of the work
+async function saveCounter() {
+	const channel = await fetchChannel(Env.StorageChannelId);
+	if (!channel) return;
+	const content = 'COUNTER```json\n' + JSON.stringify(Counter.values) + '\n```';
+	try {
+		if (Counter.messageId) {
+			const existing = await channel.messages.fetch(Counter.messageId).catch(() => null);
+			if (existing) return void (await existing.edit(content));
+		}
+		const sent = await channel.send(content);
+		Counter.messageId = sent.id;
+	} catch (err) {
+		logError('Counter save failed', err);
+	}
+}
 
-### :ghostball: 4. Abandonment
-If the deadline passes and I haven't heard from you, the job is treated as abandoned and it doesn't get paid.
--# This only applies after the deadline with no contact. Being late while keeping me updated is a different thing and we sort that out normally.
+function highestExistingNumber(category, prefix) {
+	const pattern = new RegExp(`^┃${prefix}-(\\d+)$`);
+	let highest = 0;
+	for (const channel of category?.children?.cache?.values() ?? []) {
+		const match = channel.name.match(pattern);
+		if (match) highest = Math.max(highest, Number(match[1]));
+	}
+	return highest;
+}
 
-### :Timer: 5. Updates every 2 days
-Post a short update in your project channel at least every second day:
-- What you finished
-- What you're working on next
-- Anything blocking you, and any questions
+function nextNumber(prefix, category) {
+	const run = Counter.queue.then(async () => {
+		const next = Math.max(Counter.values[prefix] || 0, highestExistingNumber(category, prefix)) + 1;
+		Counter.values[prefix] = next;
+		await saveCounter();
+		return String(next).padStart(3, '0');
+	});
+	Counter.queue = run.catch(() => {});
+	return run;
+}
 
-Two lines is enough. I'd rather have *"nothing new today, still on the UI"* than nothing at all.
+// --=-== | Invoice database (Turso, optional) | ==-=--
 
-### :chatting: 6. Keep it in the project channel
-Every job gets its own channel. Files, questions, progress and decisions go there, not in DMs. That way nothing gets lost and anyone who needs to check the status can.
+let turso = null;
+try {
+	if (Env.TursoUrl) turso = createClient({ url: Env.TursoUrl, authToken: Env.TursoToken });
+} catch (err) {
+	logError('Turso client setup failed — invoice tracking disabled', err);
+}
 
-**Please react with a :tick: after reading!**
--# Last updated 13.09.2026 · questions about any of this go in <#1548425329062969346> and ping us!`;
+async function dbRun(sql, args = []) {
+	if (!turso) return null;
+	try {
+		return await turso.execute({ sql, args });
+	} catch (err) {
+		logError('Database query failed', err);
+		return null;
+	}
+}
 
-// --=-== | Invoice channel creation | ==-=--
+async function ensureInvoiceTable() {
+	if (!turso) return;
+	await dbRun(`CREATE TABLE IF NOT EXISTS invoices (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		discord_user_id TEXT NOT NULL,
+		discord_username TEXT NOT NULL,
+		channel_id TEXT NOT NULL,
+		channel_name TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending',
+		created_at TEXT NOT NULL DEFAULT (datetime('now'))
+	)`);
+	if (turso) await turso.execute('ALTER TABLE invoices ADD COLUMN approved_invoice_url TEXT').catch(() => {});
+	if (turso) await turso.execute('ALTER TABLE invoices ADD COLUMN approved_at TEXT').catch(() => {});
+}
 
-async function createInvoiceChannel(interaction) {
+// --=-== | Slash commands | ==-=--
+
+const commands = [
+	new SlashCommandBuilder()
+		.setName('create-applications-panel')
+		.setDescription('Post the applications panel — one button per #607d8b role'),
+	new SlashCommandBuilder()
+		.setName('create-invoice-panel')
+		.setDescription('Post the payment ticket panel in this channel'),
+	new SlashCommandBuilder()
+		.setName('post-verify')
+		.setDescription('Post the verification panel in this channel'),
+	new SlashCommandBuilder()
+		.setName('add-employee')
+		.setDescription('Give a user access to a project channel')
+		.addUserOption((o) => o.setName('user').setDescription('Who to add').setRequired(true))
+		.addChannelOption((o) =>
+			o.setName('channel').setDescription('Which project channel').setRequired(true).addChannelTypes(ChannelType.GuildText)
+		),
+	new SlashCommandBuilder()
+		.setName('approve-invoice')
+		.setDescription('Record this invoice channel as approved with the completed file')
+		.addAttachmentOption((o) => o.setName('invoice').setDescription('The completed invoice PDF').setRequired(true)),
+	new SlashCommandBuilder()
+		.setName('send-message')
+		.setDescription('Post a message as the bot in any channel')
+		.addChannelOption((o) =>
+			o.setName('channel').setDescription('Which channel').setRequired(true).addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+		)
+		.addStringOption((o) => o.setName('message').setDescription('What to send').setRequired(true).setMaxLength(2000)),
+	new SlashCommandBuilder()
+		.setName('clear-channel')
+		.setDescription('Delete every message in a channel — irreversible')
+		.addChannelOption((o) =>
+			o.setName('channel').setDescription('Which channel to wipe').setRequired(true).addChannelTypes(ChannelType.GuildText)
+		)
+		.addStringOption((o) => o.setName('confirm').setDescription('Type CONFIRM exactly to actually do this').setRequired(true)),
+	new SlashCommandBuilder()
+		.setName('bot-status')
+		.setDescription('Show whether every part of the bot is configured and healthy'),
+].map((c) => c.toJSON());
+
+async function registerCommands() {
+	const rest = new REST({ version: '10' }).setToken(Env.DiscordToken);
+	for (let attempt = 1; attempt <= 5; attempt++) {
+		try {
+			await rest.put(Routes.applicationGuildCommands(Env.ClientId, Env.GuildId), { body: commands });
+			return log(`Registered ${commands.length} commands`);
+		} catch (err) {
+			logError(`Command registration attempt ${attempt} failed`, err);
+			await sleep(attempt * 10 * 1000);
+		}
+	}
+}
+
+// --=-== | Panels | ==-=--
+
+function applicationRoles(guild) {
+	return [...guild.roles.cache.filter((r) => r.hexColor.toLowerCase() === APPLICATION_ROLE_COLOR).values()].sort(
+		(a, b) => b.position - a.position
+	);
+}
+
+function buildApplicationsPanel(roles) {
+	const rows = [];
+	for (let i = 0; i < roles.length && rows.length < 5; i += 5) {
+		rows.push(
+			new ActionRowBuilder().addComponents(
+				roles.slice(i, i + 5).map((role) =>
+					new ButtonBuilder().setCustomId(`apply:${role.id}`).setLabel(role.name.slice(0, 80)).setStyle(ButtonStyle.Primary)
+				)
+			)
+		);
+	}
+	const embed = new EmbedBuilder()
+		.setColor(BRAND_COLOR)
+		.setTitle('Applications')
+		.setDescription('Pick the role you were pinged for. A private channel opens with the Leads.\n-# You need that role to apply.')
+		.setFooter(FOOTER);
+	return { embeds: [embed], components: rows };
+}
+
+function buildVerifyPanel() {
+	const rules = Env.RulesChannelId ? `<#${Env.RulesChannelId}>` : 'the rules';
+	const embed = new EmbedBuilder()
+		.setColor(GREEN_COLOR)
+		.setTitle('Verify to enter')
+		.setDescription(`Read ${rules} first.\n\nOnce you're good with it, click **Verify** below to unlock the rest of the server.`)
+		.setFooter(FOOTER);
+	const row = new ActionRowBuilder().addComponents(
+		new ButtonBuilder().setCustomId('verify_member').setLabel('VERIFY').setStyle(ButtonStyle.Success)
+	);
+	return { embeds: [embed], components: [row] };
+}
+
+function buildInvoicePanel() {
+	const embed = new EmbedBuilder()
+		.setColor(GREEN_COLOR)
+		.setTitle('💵 Request a payment')
+		.setDescription('Create a ticket for payment. A private channel opens with your name on it and is kept on record.')
+		.setFooter(FOOTER);
+	const row = new ActionRowBuilder().addComponents(
+		new ButtonBuilder().setCustomId('open_invoice').setLabel('Create Payment Ticket').setStyle(ButtonStyle.Success)
+	);
+	return { embeds: [embed], components: [row] };
+}
+
+// --=-== | Application tickets | ==-=--
+
+async function findOpenTicket(category, userId) {
+	return category.children.cache.find((c) => c.topic?.startsWith(`applicant:${userId}`)) || null;
+}
+
+async function createApplicationTicket(interaction, role) {
 	const guild = interaction.guild;
-	const category = await guild.channels.fetch(INVOICES_CATEGORY_ID);
-	await guild.channels.fetch();
-	const slug = interaction.user.username.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+	const category = await fetchChannel(Env.TicketsCategoryId);
+	if (!category || category.type !== ChannelType.GuildCategory) {
+		return respond(interaction, "The Tickets category can't be found — a Lead needs to check TICKETS_CATEGORY_ID.");
+	}
 
-	const existing = category.children.cache.filter((c) => c.name.startsWith(`┃${slug}-`));
-	const number = String(existing.size + 1).padStart(3, '0');
+	const existing = await findOpenTicket(category, interaction.user.id);
+	if (existing) return respond(interaction, `You already have an open application: ${existing}`);
+
+	const number = await nextNumber('application', category);
+	const channel = await guild.channels.create({
+		name: `┃application-${number}`,
+		type: ChannelType.GuildText,
+		parent: category.id,
+		topic: `applicant:${interaction.user.id} role:${role.id}`,
+		permissionOverwrites: [
+			{ id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+			{
+				id: interaction.user.id,
+				allow: [
+					PermissionsBitField.Flags.ViewChannel,
+					PermissionsBitField.Flags.SendMessages,
+					PermissionsBitField.Flags.ReadMessageHistory,
+					PermissionsBitField.Flags.AttachFiles,
+				],
+			},
+			{
+				id: Env.LeadsRoleId,
+				allow: [
+					PermissionsBitField.Flags.ViewChannel,
+					PermissionsBitField.Flags.SendMessages,
+					PermissionsBitField.Flags.ReadMessageHistory,
+					PermissionsBitField.Flags.ManageChannels,
+				],
+			},
+			{
+				id: client.user.id,
+				allow: [
+					PermissionsBitField.Flags.ViewChannel,
+					PermissionsBitField.Flags.SendMessages,
+					PermissionsBitField.Flags.ManageChannels,
+					PermissionsBitField.Flags.EmbedLinks,
+					PermissionsBitField.Flags.AttachFiles,
+				],
+			},
+		],
+	});
+
+	const embed = new EmbedBuilder()
+		.setColor(BRAND_COLOR)
+		.setTitle(`${role.name} — ${number}`)
+		.setThumbnail(interaction.user.displayAvatarURL())
+		.addFields({ name: 'Opened by', value: `<@${interaction.user.id}>` })
+		.setFooter(FOOTER)
+		.setTimestamp();
+
+	const buttons = new ActionRowBuilder().addComponents(
+		new ButtonBuilder().setCustomId(`approve:${interaction.user.id}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+		new ButtonBuilder().setCustomId('close_ticket').setLabel('Close ticket').setStyle(ButtonStyle.Danger)
+	);
+
+	await channel.send({ content: `<@&${Env.LeadsRoleId}> <@${interaction.user.id}>`, embeds: [embed], components: [buttons] });
+	return respond(interaction, `Application opened: ${channel}`);
+}
+
+function resolveApplicationRole(guild, customId) {
+	const [kind, value] = customId.split(':');
+	if (kind === 'apply') return guild.roles.cache.get(value) || null;
+	return guild.roles.cache.find((r) => slugify(r.name) === value) || null;
+}
+
+// --=-== | Invoice tickets | ==-=--
+
+const invoiceCooldowns = new Map();
+
+async function createInvoiceTicket(interaction) {
+	const guild = interaction.guild;
+	const category = await fetchChannel(Env.InvoicesCategoryId);
+	if (!category || category.type !== ChannelType.GuildCategory) {
+		return respond(interaction, "The Invoices category can't be found — a Lead needs to check INVOICES_CATEGORY_ID.");
+	}
+
+	const slug = slugify(interaction.user.username);
+	const number = String(highestExistingNumber(category, slug) + 1).padStart(3, '0');
 	const name = `┃${slug}-${number}`;
 
 	const channel = await guild.channels.create({
 		name,
 		type: ChannelType.GuildText,
-		parent: INVOICES_CATEGORY_ID,
+		parent: category.id,
+		topic: `invoice:${interaction.user.id}`,
 		permissionOverwrites: [
 			{ id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
 			{
 				id: interaction.user.id,
-				allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
+				allow: [
+					PermissionsBitField.Flags.ViewChannel,
+					PermissionsBitField.Flags.SendMessages,
+					PermissionsBitField.Flags.ReadMessageHistory,
+					PermissionsBitField.Flags.AttachFiles,
+				],
 			},
 			{
-				id: LEADS_ROLE_ID,
-				allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
+				id: Env.LeadsRoleId,
+				allow: [
+					PermissionsBitField.Flags.ViewChannel,
+					PermissionsBitField.Flags.SendMessages,
+					PermissionsBitField.Flags.ReadMessageHistory,
+				],
+			},
+			{
+				id: client.user.id,
+				allow: [
+					PermissionsBitField.Flags.ViewChannel,
+					PermissionsBitField.Flags.SendMessages,
+					PermissionsBitField.Flags.ManageMessages,
+					PermissionsBitField.Flags.EmbedLinks,
+					PermissionsBitField.Flags.AttachFiles,
+				],
 			},
 		],
 	});
 
-	const invoiceEmbed = new EmbedBuilder()
+	const embed = new EmbedBuilder()
 		.setColor(BRAND_COLOR)
 		.setTitle('Invoice template attached')
 		.setDescription(
 			"We're not able to fill this in on your behalf for legal reasons — please complete it yourself.\n\n" +
 				'Fill in your **legal name and legal address** along with the rest of your details under **Payee**, list what was delivered under **Work** with quantity and rate, fill in **Payment** with how you want to be paid, and note the project under **Project**. Once it\'s filled in, export it as a **PDF** and post that back in this channel — a Lead will review and process it from here.'
 		)
-		.setFooter({ text: 'Qualion Management' });
+		.setFooter(FOOTER);
 
-	const templatePath = path.join(__dirname, 'InvoiceTemplate.docx');
-	const pingContent = `<@&${LEADS_ROLE_ID}> <@${interaction.user.id}>`;
-
+	const ping = `<@&${Env.LeadsRoleId}> <@${interaction.user.id}>`;
+	let message;
 	try {
-		const templateMessage = await channel.send({ content: pingContent, embeds: [invoiceEmbed], files: [templatePath] });
-		await templateMessage.pin().catch(() => {});
+		message = await channel.send({ content: ping, embeds: [embed], files: [TEMPLATE_PATH] });
 	} catch (err) {
-		console.log(`Invoice template attachment failed (${templatePath}): ${err.message}`);
-		const fallbackMessage = await channel.send({
-			content: `${pingContent}\n\n⚠️ The template file couldn't be attached — check with a Lead.`,
-			embeds: [invoiceEmbed],
-		});
-		await fallbackMessage.pin().catch(() => {});
+		logError('Invoice template attach failed', err);
+		message = await channel.send({ content: `${ping}\n\n⚠️ The template file couldn't be attached — ask a Lead for it.`, embeds: [embed] });
 	}
+	await message.pin().catch((err) => logError('Invoice pin failed', err));
 
-	await recordInvoice(channel, name, interaction.user);
-
-	return channel;
-}
-
-// --=-== | Ticket creation | ==-=--
-
-async function createTicketChannel(interaction, type) {
-	const guild = interaction.guild;
-	const number = await nextNumber(type.prefix);
-	const name = `┃${type.prefix}-${number}`;
-
-	const overwrites = [
-		{ id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-		{
-			id: interaction.user.id,
-			allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages],
-		},
-		{
-			id: LEADS_ROLE_ID,
-			allow: [
-				PermissionsBitField.Flags.ViewChannel,
-				PermissionsBitField.Flags.SendMessages,
-				PermissionsBitField.Flags.ManageChannels,
-			],
-		},
-	];
-
-	const channel = await guild.channels.create({
+	await dbRun('INSERT INTO invoices (discord_user_id, discord_username, channel_id, channel_name) VALUES (?, ?, ?, ?)', [
+		interaction.user.id,
+		interaction.user.username,
+		channel.id,
 		name,
-		type: ChannelType.GuildText,
-		parent: TICKETS_CATEGORY_ID,
-		permissionOverwrites: overwrites,
-	});
-
-	const embed = new EmbedBuilder()
-		.setColor(BRAND_COLOR)
-		.setTitle(`${type.label}  —  ${number}`)
-		.setThumbnail(interaction.user.displayAvatarURL())
-		.addFields({ name: 'Opened by', value: `<@${interaction.user.id}>` })
-		.setFooter({ text: 'Qualion Management' })
-		.setTimestamp();
-
-	const buttons = [];
-	if (type.roleId) {
-		buttons.push(
-			new ButtonBuilder()
-				.setCustomId(`approve:${interaction.user.id}`)
-				.setLabel('Approve')
-				.setStyle(ButtonStyle.Success)
-		);
-	}
-	buttons.push(new ButtonBuilder().setCustomId('close_ticket').setLabel('Close ticket').setStyle(ButtonStyle.Danger));
-
-	const pingParts = [`<@&${LEADS_ROLE_ID}>`, `<@${interaction.user.id}>`];
-
-	await channel.send({
-		content: pingParts.join(' '),
-		embeds: [embed],
-		components: [new ActionRowBuilder().addComponents(buttons)],
-	});
-	return channel;
+	]);
+	invoiceCooldowns.set(interaction.user.id, Date.now());
+	return respond(interaction, `Payment ticket opened: ${channel}`);
 }
 
 // --=-== | Clear channel | ==-=--
 
 async function clearChannel(channel) {
-	let totalDeleted = 0;
-	let fetched;
-	do {
-		fetched = await channel.messages.fetch({ limit: 100 });
+	let total = 0;
+	for (;;) {
+		const fetched = await channel.messages.fetch({ limit: 100 });
 		if (fetched.size === 0) break;
-
-		if (fetched.size === 1) {
-			await fetched.first().delete().catch(() => {});
-			totalDeleted += 1;
-			break;
-		}
-
 		const deleted = await channel.bulkDelete(fetched, true).catch(() => new Map());
-		totalDeleted += deleted.size;
-
+		total += deleted.size;
 		const remaining = fetched.filter((m) => !deleted.has(m.id));
-		for (const msg of remaining.values()) {
-			await msg.delete().catch(() => {});
-			totalDeleted += 1;
-			await new Promise((r) => setTimeout(r, 1000));
+		for (const message of remaining.values()) {
+			await message.delete().catch(() => {});
+			total += 1;
+			await sleep(1000);
 		}
-	} while (fetched.size >= 2);
-	return totalDeleted;
+	}
+	return total;
 }
 
-// --=-== | Add-ticket-type wizard | ==-=--
+// --=-== | Command handlers | ==-=--
 
-const activeWizards = new Set();
-const invoiceCooldowns = new Map();
-const INVOICE_COOLDOWN_MS = 5 * 60 * 1000;
+const CommandHandlers = {
+	'create-applications-panel': async (interaction) => {
+		await interaction.guild.roles.fetch();
+		const roles = applicationRoles(interaction.guild);
+		if (roles.length === 0) return respond(interaction, `No roles with color ${APPLICATION_ROLE_COLOR} found.`);
+		await interaction.channel.send(buildApplicationsPanel(roles));
+		const shown = roles.slice(0, 25).map((r) => r.name).join(', ');
+		const extra = roles.length > 25 ? `\n⚠️ Discord allows 25 buttons per message — ${roles.length - 25} role(s) left off.` : '';
+		return respond(interaction, `Panel posted with: ${shown}.${extra}\nDelete any older panel above it.`);
+	},
 
-async function askInChat(channel, userId, question) {
-	await channel.send(question);
-	const collected = await channel
-		.awaitMessages({ filter: (m) => m.author.id === userId, max: 1, time: 120000 })
-		.catch(() => null);
-	if (!collected || collected.size === 0) return null;
-	const msg = collected.first();
-	if (msg.content.trim().toLowerCase() === 'cancel') return undefined;
-	return msg;
-}
+	'create-invoice-panel': async (interaction) => {
+		await interaction.channel.send(buildInvoicePanel());
+		return respond(interaction, 'Invoice panel posted.');
+	},
 
-async function runAddTicketWizard(interaction) {
-	const userId = interaction.user.id;
-	const channel = interaction.channel;
+	'post-verify': async (interaction) => {
+		await interaction.channel.send(buildVerifyPanel());
+		return respond(interaction, 'Verification panel posted.');
+	},
 
-	if (activeWizards.has(userId)) {
-		await interaction.reply({
-			content: 'Already running a setup for you \u2014 finish that one or type cancel first.',
-			ephemeral: true,
+	'add-employee': async (interaction) => {
+		const user = interaction.options.getUser('user');
+		const channel = await fetchChannel(interaction.options.getChannel('channel').id);
+		if (!channel) return respond(interaction, "That channel can't be found.");
+		await channel.permissionOverwrites.edit(user.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true });
+		await channel.send(`<@${user.id}> has been added to this project.`);
+		return respond(interaction, `Added <@${user.id}> to ${channel}.`);
+	},
+
+	'approve-invoice': async (interaction) => {
+		const channel = interaction.channel;
+		if (!Env.InvoicesCategoryId || channel.parentId !== Env.InvoicesCategoryId) {
+			return respond(interaction, 'This only works inside an invoice channel.');
+		}
+		const attachment = interaction.options.getAttachment('invoice');
+		const match = channel.name.replace(/^┃/, '').match(/^(.+)-(\d{3})$/);
+		const displayName = match ? `${match[1].charAt(0).toUpperCase()}${match[1].slice(1)} - ${match[2]}` : channel.name;
+
+		const updated = await dbRun(
+			"UPDATE invoices SET status = 'approved', approved_invoice_url = ?, approved_at = datetime('now') WHERE channel_id = ?",
+			[attachment.url, channel.id]
+		);
+		if (updated && updated.rowsAffected === 0) {
+			const ownerId = channel.topic?.match(/^invoice:(\d+)/)?.[1] || interaction.user.id;
+			await dbRun(
+				"INSERT INTO invoices (discord_user_id, discord_username, channel_id, channel_name, status, approved_invoice_url, approved_at) VALUES (?, ?, ?, ?, 'approved', ?, datetime('now'))",
+				[ownerId, displayName, channel.id, displayName, attachment.url]
+			);
+		}
+
+		await channel.send({
+			embeds: [
+				new EmbedBuilder()
+					.setColor(GREEN_COLOR)
+					.setTitle('✅ Invoice approved')
+					.setDescription(`Recorded as **${displayName}**.\n\n[View the submitted invoice](${attachment.url})`),
+			],
 		});
-		return;
-	}
-	activeWizards.add(userId);
-	await interaction.reply({ content: 'Setup starting below \u2014 answer in this channel. Type cancel any time to stop.', ephemeral: true });
+		const note = turso ? '' : '\n-# Turso isn\'t configured, so this was only recorded in Discord.';
+		return respond(interaction, `Marked ${displayName} as approved.${note}`);
+	},
 
-	try {
-		const idMsg = await askInChat(channel, userId, '**Step 1/4** — short id for this type (lowercase, no spaces — e.g. `ui`, `pm`):');
-		if (idMsg == null) return void (await channel.send(idMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
-		const id = idMsg.content.trim().toLowerCase().replace(/\s+/g, '-');
+	'send-message': async (interaction) => {
+		const channel = await fetchChannel(interaction.options.getChannel('channel').id);
+		if (!channel) return respond(interaction, "That channel can't be found.");
+		const text = resolveEmojis(interaction.guild, interaction.options.getString('message'));
+		if (text.length > 2000) return respond(interaction, `That message is ${text.length} characters — Discord's limit is 2000.`);
+		await channel.send(text);
+		return respond(interaction, `Sent to ${channel}.`);
+	},
 
-		const labelMsg = await askInChat(channel, userId, '**Step 2/4** — what should the button say? (e.g. `UI Designer`):');
-		if (labelMsg == null) return void (await channel.send(labelMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
-		const label = labelMsg.content.trim();
+	'clear-channel': async (interaction) => {
+		if (interaction.options.getString('confirm') !== 'CONFIRM') {
+			return respond(interaction, 'Not run — type CONFIRM exactly in the confirm field. This cannot be undone.');
+		}
+		const channel = await fetchChannel(interaction.options.getChannel('channel').id);
+		if (!channel) return respond(interaction, "That channel can't be found.");
+		const count = await clearChannel(channel);
+		return respond(interaction, `Deleted ${count} message(s) from ${channel}.`);
+	},
 
-		const prefixMsg = await askInChat(channel, userId, '**Step 3/4** — what should ticket channels be named? (e.g. `application`, `ticket`):');
-		if (prefixMsg == null) return void (await channel.send(prefixMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
-		const prefix = prefixMsg.content.trim().toLowerCase().replace(/\s+/g, '-');
-
-		const roleMsg = await askInChat(channel, userId, '**Step 4/4** — mention the role to ping and grant access, or type `skip` for none:');
-		if (roleMsg == null) return void (await channel.send(roleMsg === null ? 'Timed out — setup cancelled.' : 'Setup cancelled.'));
-		const mentionedRole = roleMsg.mentions.roles.first();
-		const roleId = mentionedRole ? mentionedRole.id : null;
-
-		const config = loadJson(CONFIG_FILE, {});
-		config[id] = { id, label, prefix, roleId };
-		saveJson(CONFIG_FILE, config);
-
-		const summary = new EmbedBuilder()
+	'bot-status': async (interaction) => {
+		const check = async (label, id, type) => {
+			if (!id) return `⚪ ${label} — not set`;
+			const found = type === 'role' ? interaction.guild.roles.cache.get(id) : await fetchChannel(id);
+			return found ? `🟢 ${label}` : `🔴 ${label} — ID set but not found`;
+		};
+		const lines = await Promise.all([
+			check('Leads role', Env.LeadsRoleId, 'role'),
+			check('Member role', Env.MemberRoleId, 'role'),
+			check('Rules channel', Env.RulesChannelId),
+			check('Tickets category', Env.TicketsCategoryId),
+			check('Projects category', Env.ProjectsCategoryId),
+			check('Invoices category', Env.InvoicesCategoryId),
+			check('Storage channel', Env.StorageChannelId),
+		]);
+		const database = turso ? ((await dbRun('SELECT 1')) ? '🟢 Turso database' : '🔴 Turso database — not reachable') : '⚪ Turso database — not set';
+		const uptime = Math.floor((Date.now() - BOOTED_AT) / 60000);
+		const embed = new EmbedBuilder()
 			.setColor(BRAND_COLOR)
-			.setTitle('Ticket type saved')
+			.setTitle('Bot status')
+			.setDescription([...lines, database].join('\n'))
 			.addFields(
-				{ name: 'ID', value: id, inline: true },
-				{ name: 'Button', value: label, inline: true },
-				{ name: 'Prefix', value: prefix, inline: true },
-				{ name: 'Role', value: roleId ? `<@&${roleId}>` : 'None', inline: true }
+				{ name: 'Gateway ping', value: `${client.ws.ping} ms`, inline: true },
+				{ name: 'Uptime', value: `${uptime} min`, inline: true },
+				{ name: 'Application roles', value: String(applicationRoles(interaction.guild).length), inline: true }
 			)
-			.setFooter({ text: 'Run /post-panel to show it on the panel' });
-		await channel.send({ embeds: [summary] });
-	} finally {
-		activeWizards.delete(userId);
+			.setFooter(FOOTER);
+		return respond(interaction, '', { embeds: [embed] });
+	},
+};
+
+// --=-== | Component handlers | ==-=--
+
+async function handleApply(interaction) {
+	const blocked = requireEnv(['TicketsCategoryId']);
+	if (blocked) return respond(interaction, blocked);
+	const role = resolveApplicationRole(interaction.guild, interaction.customId);
+	if (!role) return respond(interaction, 'This panel is out of date — ask a Lead to run /create-applications-panel again.');
+	if (!hasRole(interaction.member, role.id)) return respond(interaction, `You need the <@&${role.id}> role before applying for it.`);
+	return createApplicationTicket(interaction, role);
+}
+
+async function handleInvoice(interaction) {
+	const blocked = requireEnv(['InvoicesCategoryId']);
+	if (blocked) return respond(interaction, blocked);
+	const lastUsed = invoiceCooldowns.get(interaction.user.id);
+	if (lastUsed && Date.now() - lastUsed < INVOICE_COOLDOWN_MS) {
+		const readyAt = Math.floor((lastUsed + INVOICE_COOLDOWN_MS) / 1000);
+		return respond(interaction, `You can create another payment ticket <t:${readyAt}:R>.`);
 	}
+	return createInvoiceTicket(interaction);
+}
+
+async function handleVerify(interaction) {
+	const blocked = requireEnv(['MemberRoleId']);
+	if (blocked) return respond(interaction, blocked);
+	if (hasRole(interaction.member, Env.MemberRoleId)) return respond(interaction, "You're already verified.");
+	try {
+		await interaction.member.roles.add(Env.MemberRoleId);
+		return respond(interaction, "You're verified — welcome in.");
+	} catch (err) {
+		logError('Verify role add failed (is the bot role above Member?)', err);
+		return respond(interaction, "Couldn't give you the role — please ping a Lead.");
+	}
+}
+
+async function handleApprove(interaction) {
+	if (!isLead(interaction)) return respond(interaction, 'Only Leads can approve this.');
+	const blocked = requireEnv(['ProjectsCategoryId']);
+	if (blocked) return respond(interaction, blocked);
+	const applicantId = interaction.customId.split(':')[1];
+	const channels = await interaction.guild.channels.fetch();
+	const projects = [...channels.filter((c) => c?.parentId === Env.ProjectsCategoryId && c.type === ChannelType.GuildText).values()]
+		.sort((a, b) => a.position - b.position)
+		.slice(0, 25);
+	if (projects.length === 0) return respond(interaction, 'No channels found under the Projects category.');
+	const menu = new StringSelectMenuBuilder()
+		.setCustomId(`approve_channel:${applicantId}`)
+		.setPlaceholder('Which project should they join?')
+		.addOptions(projects.map((c) => ({ label: c.name.replace(/^┃/, '').slice(0, 100), value: c.id })));
+	return respond(interaction, `Pick the project to add <@${applicantId}> to:`, {
+		components: [new ActionRowBuilder().addComponents(menu)],
+	});
+}
+
+async function handleApproveChannel(interaction) {
+	if (!isLead(interaction)) return respond(interaction, 'Only Leads can approve this.');
+	const applicantId = interaction.customId.split(':')[1];
+	const target = await fetchChannel(interaction.values[0]);
+	if (!target) return respond(interaction, "That channel doesn't exist anymore.");
+	await target.permissionOverwrites.edit(applicantId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true });
+	await target.send(`<@${applicantId}> has been added to this project.`);
+	await interaction.channel?.send({ embeds: [notice(`✅ <@${applicantId}> was added to ${target} by <@${interaction.user.id}>.`, GREEN_COLOR)] }).catch(() => {});
+	return respond(interaction, `<@${applicantId}> added to ${target}.`);
+}
+
+async function handleClose(interaction) {
+	if (!isLead(interaction)) return respond(interaction, 'Only Leads can close this.');
+	await interaction.reply({ embeds: [notice('Closing this ticket in 5 seconds.', RED_COLOR)] });
+	const channel = interaction.channel;
+	setTimeout(() => channel?.delete().catch((err) => logError('Ticket delete failed', err)), 5000);
+}
+
+async function handleComponent(interaction) {
+	const id = interaction.customId;
+	if (id === 'close_ticket') return handleClose(interaction);
+
+	if (interaction.isStringSelectMenu() && id.startsWith('approve_channel:')) {
+		await interaction.deferUpdate();
+		return handleApproveChannel(interaction);
+	}
+
+	await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+	if (id.startsWith('apply:') || id.startsWith('open:')) return handleApply(interaction);
+	if (id === 'open_invoice') return handleInvoice(interaction);
+	if (id === 'verify_member') return handleVerify(interaction);
+	if (id.startsWith('approve:')) return handleApprove(interaction);
+	return respond(interaction, 'This button is no longer used.');
+}
+
+async function handleCommand(interaction) {
+	if (!isLead(interaction)) {
+		return interaction.reply({ content: 'Only Leads can use bot commands.', flags: MessageFlags.Ephemeral });
+	}
+	const handler = CommandHandlers[interaction.commandName];
+	if (!handler) return interaction.reply({ content: 'Unknown command — it may have been removed.', flags: MessageFlags.Ephemeral });
+	await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+	return handler(interaction);
 }
 
 // --=-== | Events | ==-=--
 
 client.once(Events.ClientReady, async () => {
-	await registerCommands();
-	await loadCounterFromDiscord();
-	await ensureInvoiceTable();
-	console.log(`Logged in as ${client.user.tag}`);
+	log(`Logged in as ${client.user.tag}`);
+	await Promise.allSettled([registerCommands(), loadCounter(), ensureInvoiceTable()]);
+	const guild = client.guilds.cache.get(Env.GuildId);
+	if (!guild) logError('Startup', `Bot is not in the server GUILD_ID=${Env.GuildId}`);
+	log('Startup complete');
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+	if (!interaction.inGuild()) return;
 	try {
-		if (interaction.isChatInputCommand() && !interaction.member.roles.cache.has(LEADS_ROLE_ID)) {
-			await interaction.reply({ content: 'Only Leads can use bot commands.', ephemeral: true });
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'add-ticket-type') {
-			await runAddTicketWizard(interaction);
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'remove-ticket-type') {
-			const config = loadJson(CONFIG_FILE, {});
-			const id = interaction.options.getString('id');
-			delete config[id];
-			saveJson(CONFIG_FILE, config);
-			await interaction.reply({ content: `Ticket type "${id}" removed.`, ephemeral: true });
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'list-ticket-types') {
-			const config = loadJson(CONFIG_FILE, {});
-			const types = Object.values(config);
-			const embed = new EmbedBuilder().setColor(BRAND_COLOR).setTitle('Ticket types');
-			if (types.length === 0) {
-				embed.setDescription('None configured yet.');
-			} else {
-				for (const t of types) {
-					embed.addFields({
-						name: `${t.label}  •  ${t.id}`,
-						value: `Prefix: \`${t.prefix}\`\nRole: ${t.roleId ? `<@&${t.roleId}>` : 'None'}`,
-					});
-				}
-			}
-			await interaction.reply({ embeds: [embed], ephemeral: true });
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'post-panel') {
-			const config = loadJson(CONFIG_FILE, {});
-			const panel = buildPanel(config);
-			if (!panel) {
-				await interaction.reply({
-					content: 'No ticket types configured yet — add one with /add-ticket-type first.',
-					ephemeral: true,
-				});
-				return;
-			}
-			await interaction.channel.send(panel);
-			await interaction.reply({ content: 'Panel posted.', ephemeral: true });
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'clear-channel') {
-			const confirm = interaction.options.getString('confirm');
-			if (confirm !== 'CONFIRM') {
-				await interaction.reply({
-					content: 'Not run — type CONFIRM exactly in the confirm field to actually wipe the channel. This cannot be undone.',
-					ephemeral: true,
-				});
-				return;
-			}
-			const targetOption = interaction.options.getChannel('channel');
-			const channel = await interaction.guild.channels.fetch(targetOption.id);
-			await interaction.deferReply({ ephemeral: true });
-			const deletedCount = await clearChannel(channel);
-			await interaction.editReply(`Deleted ${deletedCount} message(s) from ${channel}.`);
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'create-applications-panel') {
-			await interaction.guild.roles.fetch();
-			const matchingRoles = interaction.guild.roles.cache.filter((r) => r.hexColor === '#607d8b');
-			if (matchingRoles.size === 0) {
-				await interaction.reply({ content: 'No roles with color #607d8b found.', ephemeral: true });
-				return;
-			}
-
-			const config = loadJson(CONFIG_FILE, {});
-			for (const role of matchingRoles.values()) {
-				const id = role.name.trim().toLowerCase().replace(/\s+/g, '-');
-				config[id] = { id, label: role.name, prefix: 'application', roleId: role.id };
-			}
-			saveJson(CONFIG_FILE, config);
-
-			await interaction.channel.send(buildPanel(config));
-			await interaction.reply({
-				content: `Added/updated ${matchingRoles.size} ticket type(s) from role color and posted the panel.`,
-				ephemeral: true,
-			});
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'clear-ticket-types') {
-			const confirm = interaction.options.getString('confirm');
-			if (confirm !== 'CONFIRM') {
-				await interaction.reply({
-					content: 'Not run — type CONFIRM exactly in the confirm field to actually clear every ticket type.',
-					ephemeral: true,
-				});
-				return;
-			}
-			const config = loadJson(CONFIG_FILE, {});
-			const count = Object.keys(config).length;
-			saveJson(CONFIG_FILE, {});
-			await interaction.reply({
-				content: `Removed all ${count} ticket type(s). Any already-posted panel keeps its old buttons until it's deleted and reposted.`,
-				ephemeral: true,
-			});
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'post-verify') {
-			await interaction.channel.send(buildVerifyPanel());
-			await interaction.reply({ content: 'Verification panel posted.', ephemeral: true });
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'add-employee') {
-			const user = interaction.options.getUser('user');
-			const targetOption = interaction.options.getChannel('channel');
-			const channel = await interaction.guild.channels.fetch(targetOption.id);
-			await channel.permissionOverwrites.edit(user.id, {
-				ViewChannel: true,
-				SendMessages: true,
-				ReadMessageHistory: true,
-			});
-			await channel.send(`<@${user.id}> has been added to this project.`);
-			await interaction.reply({ content: `Added <@${user.id}> to ${channel}.`, ephemeral: true });
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'create-invoice-panel') {
-			await interaction.channel.send(buildInvoicePanel());
-			await interaction.reply({ content: 'Invoice panel posted.', ephemeral: true });
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'approve-invoice') {
-			const channel = interaction.channel;
-			if (channel.parentId !== INVOICES_CATEGORY_ID) {
-				await interaction.reply({ content: 'This only works inside an invoice channel.', ephemeral: true });
-				return;
-			}
-
-			const attachment = interaction.options.getAttachment('invoice');
-			const raw = channel.name.replace(/^┃/, '');
-			const match = raw.match(/^(.+)-(\d{3})$/);
-			const displayName = match ? `${match[1].charAt(0).toUpperCase()}${match[1].slice(1)} - ${match[2]}` : raw;
-
-			if (turso) {
-				try {
-					const result = await turso.execute({
-						sql: "UPDATE invoices SET status = 'approved', approved_invoice_url = ?, approved_at = datetime('now') WHERE channel_id = ?",
-						args: [attachment.url, channel.id],
-					});
-					if (result.rowsAffected === 0) {
-						await turso.execute({
-							sql: "INSERT INTO invoices (discord_user_id, discord_username, channel_id, channel_name, status, approved_invoice_url, approved_at) VALUES (?, ?, ?, ?, 'approved', ?, datetime('now'))",
-							args: [interaction.user.id, interaction.user.username, channel.id, displayName, attachment.url],
-						});
-					}
-				} catch (err) {
-					console.log(`Invoice approval DB update failed: ${err.message}`);
-				}
-			}
-
-			await channel.send({
-				embeds: [
-					new EmbedBuilder()
-						.setColor(GREEN_COLOR)
-						.setTitle('✅ Invoice approved')
-						.setDescription(`Recorded as **${displayName}**.\n\n[View the submitted invoice](${attachment.url})`),
-				],
-			});
-			await interaction.reply({ content: `Marked ${displayName} as approved.`, ephemeral: true });
-			return;
-		}
-
-		if (interaction.isChatInputCommand() && interaction.commandName === 'send-message') {
-			const targetOption = interaction.options.getChannel('channel');
-			const channel = await interaction.guild.channels.fetch(targetOption.id);
-			const resolved = resolveEmojis(interaction.guild, interaction.options.getString('message'));
-
-			if (resolved.length > 2000) {
-				await interaction.reply({
-					content: `That message is ${resolved.length} characters — Discord's limit is 2000. Trim it and try again.`,
-					ephemeral: true,
-				});
-				return;
-			}
-
-			await channel.send(resolved);
-			await interaction.reply({ content: `Sent to ${channel}.`, ephemeral: true });
-			return;
-		}
-
-		if (interaction.isButton() && interaction.customId === 'open_invoice') {
-			const lastUsed = invoiceCooldowns.get(interaction.user.id);
-			const now = Date.now();
-			if (lastUsed && now - lastUsed < INVOICE_COOLDOWN_MS) {
-				const readyAt = Math.floor((lastUsed + INVOICE_COOLDOWN_MS) / 1000);
-				await interaction.reply({
-					content: `You can create another payment ticket <t:${readyAt}:R>.`,
-					ephemeral: true,
-				});
-				return;
-			}
-			await interaction.reply({ content: 'Invoice channel created, check below.', ephemeral: true });
-			await createInvoiceChannel(interaction);
-			invoiceCooldowns.set(interaction.user.id, now);
-			return;
-		}
-
-		if (interaction.isButton() && interaction.customId === 'verify_member') {
-			if (interaction.member.roles.cache.has(MEMBER_ROLE_ID)) {
-				await interaction.reply({ content: "You're already verified.", ephemeral: true });
-				return;
-			}
-			await interaction.member.roles.add(MEMBER_ROLE_ID).catch(() => {});
-			await interaction.reply({ content: "You're verified — welcome in.", ephemeral: true });
-			return;
-		}
-
-		if (interaction.isButton() && interaction.customId.startsWith('open:')) {
-			const id = interaction.customId.split(':')[1];
-			const config = loadJson(CONFIG_FILE, {});
-			const type = config[id];
-			if (!type) {
-				await interaction.reply({ content: 'That ticket type no longer exists.', ephemeral: true });
-				return;
-			}
-			if (type.roleId && !interaction.member.roles.cache.has(type.roleId)) {
-				await interaction.reply({
-					content: `You need the <@&${type.roleId}> role before opening this.`,
-					ephemeral: true,
-				});
-				return;
-			}
-			await interaction.reply({ content: 'Ticket created, check the new channel.', ephemeral: true });
-			await createTicketChannel(interaction, type);
-			return;
-		}
-
-		if (interaction.isButton() && interaction.customId.startsWith('approve:')) {
-			const isLead = interaction.member.roles.cache.has(LEADS_ROLE_ID);
-			if (!isLead) {
-				await interaction.reply({ content: 'Only Leads can approve this.', ephemeral: true });
-				return;
-			}
-			const [, applicantId] = interaction.customId.split(':');
-
-			await interaction.guild.channels.fetch();
-			const projectChannels = interaction.guild.channels.cache.filter(
-				(c) => c.parentId === PROJECTS_CATEGORY_ID && c.type === ChannelType.GuildText
-			);
-
-			if (projectChannels.size === 0) {
-				await interaction.reply({ content: 'No channels found under the Projects category.', ephemeral: true });
-				return;
-			}
-
-			const menu = new StringSelectMenuBuilder()
-				.setCustomId(`approve_channel:${applicantId}`)
-				.setPlaceholder('Which project should they join?')
-				.addOptions(
-					projectChannels.first(25).map((c) => ({ label: c.name.replace(/^┃/, ''), value: c.id }))
-				);
-
-			await interaction.reply({
-				content: 'Pick the project to add them to:',
-				components: [new ActionRowBuilder().addComponents(menu)],
-				ephemeral: true,
-			});
-			return;
-		}
-
-		if (interaction.isStringSelectMenu() && interaction.customId.startsWith('approve_channel:')) {
-			const applicantId = interaction.customId.split(':')[1];
-			const targetChannel = await interaction.guild.channels.fetch(interaction.values[0]).catch(() => null);
-			if (!targetChannel) {
-				await interaction.update({ content: "That channel doesn't exist anymore.", components: [] });
-				return;
-			}
-
-			await targetChannel.permissionOverwrites.edit(applicantId, {
-				ViewChannel: true,
-				SendMessages: true,
-				ReadMessageHistory: true,
-			});
-			await targetChannel.send(`<@${applicantId}> has been added to this project.`);
-
-			await interaction.update({
-				content: `<@${applicantId}> added to ${targetChannel}.`,
-				components: [],
-			});
-			return;
-		}
-
-		if (interaction.isButton() && interaction.customId === 'close_ticket') {
-			const isLead = interaction.member.roles.cache.has(LEADS_ROLE_ID);
-			if (!isLead) {
-				await interaction.reply({ content: 'Only Leads can close this.', ephemeral: true });
-				return;
-			}
-			await interaction.reply('Closing in 5 seconds.');
-			setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
-			return;
-		}
+		if (interaction.isChatInputCommand()) return await handleCommand(interaction);
+		if (interaction.isButton() || interaction.isStringSelectMenu()) return await handleComponent(interaction);
 	} catch (err) {
-		console.error(err);
-		if (interaction.isRepliable() && !interaction.replied) {
-			await interaction.reply({ content: 'Something went wrong, try again.', ephemeral: true }).catch(() => {});
-		}
+		logError(`Interaction ${interaction.customId || interaction.commandName} failed`, err);
+		const reason = err?.code === 50013 ? 'The bot is missing a permission for that.' : 'Something went wrong — try again in a moment.';
+		await respond(interaction, `⚠️ ${reason}`);
 	}
 });
 
-// --=-== | Keep-alive server (Render) | ==-=--
+// --=-== | Health server | ==-=--
 
-http
-	.createServer((req, res) => {
-		res.writeHead(200, { 'Content-Type': 'text/plain' });
-		res.end('OK');
-	})
-	.listen(process.env.PORT || 3000);
-
-// --=-== | Self-ping (Render) | ==-=--
-
-if (process.env.RENDER_URL) {
-	setInterval(() => {
-		https
-			.get(process.env.RENDER_URL, (res) => {
-				console.log(`Self-ping: ${res.statusCode}`);
-			})
-			.on('error', (err) => {
-				console.log(`Self-ping failed: ${err.message}`);
-			});
-	}, 4 * 60 * 1000);
+function healthReport() {
+	const ready = client.isReady() && client.ws.status === Status.Ready;
+	return {
+		ok: ready,
+		discord: ready ? 'ready' : `not ready (status ${client.ws.status})`,
+		ping: client.ws.ping,
+		uptimeMinutes: Math.floor((Date.now() - BOOTED_AT) / 60000),
+	};
 }
 
-client.login(DISCORD_TOKEN);
+const server = http.createServer((req, res) => {
+	if (req.url?.startsWith('/health')) {
+		const report = healthReport();
+		res.writeHead(report.ok ? 200 : 503, { 'Content-Type': 'application/json' });
+		return res.end(JSON.stringify(report));
+	}
+	res.writeHead(200, { 'Content-Type': 'text/plain' });
+	res.end('OK');
+});
+server.on('error', (err) => logError('Health server error', err));
+server.listen(Env.Port, () => log(`Health server on port ${Env.Port}`));
+
+// --=-== | Self-ping (keeps Render's free tier awake) | ==-=--
+
+if (Env.PublicUrl) {
+	setInterval(() => {
+		const request = https.get(Env.PublicUrl, (res) => {
+			res.resume();
+			if (res.statusCode !== 200) log(`Self-ping returned ${res.statusCode}`);
+		});
+		request.setTimeout(20000, () => request.destroy(new Error('timeout')));
+		request.on('error', (err) => log(`Self-ping failed: ${err.message}`));
+	}, SELF_PING_INTERVAL_MS);
+} else {
+	log('No RENDER_URL set — self-ping disabled');
+}
+
+// --=-== | Watchdog (restarts if Discord connection stays down) | ==-=--
+
+let unhealthySince = null;
+setInterval(() => {
+	if (healthReport().ok) {
+		unhealthySince = null;
+		return;
+	}
+	unhealthySince ??= Date.now();
+	const downFor = Date.now() - unhealthySince;
+	log(`Watchdog: Discord not ready for ${Math.round(downFor / 1000)}s`);
+	if (downFor > WATCHDOG_LIMIT_MS) {
+		logError('Watchdog', 'Discord connection down too long — restarting process');
+		process.exit(1);
+	}
+}, WATCHDOG_INTERVAL_MS);
+
+// --=-== | Login | ==-=--
+
+if (missingEnv.length === 0) {
+	client.login(Env.DiscordToken).catch((err) => {
+		const invalid = err?.code === 'TokenInvalid' || /invalid token/i.test(err?.message || '');
+		logError(invalid ? 'Login failed — DISCORD_TOKEN is invalid, reset it in the Developer Portal' : 'Login failed', err);
+		setTimeout(() => process.exit(1), invalid ? 60 * 1000 : 15 * 1000);
+	});
+}
